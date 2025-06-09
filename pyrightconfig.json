@@ -1,0 +1,28 @@
+{
+    "exclude": [
+        "**/node_modules",
+        "**/__pycache__",
+        "**/.*",
+        "env",
+        "venv",
+        ".venv",
+        "build",
+        "dist",
+        ".git",
+        "**/*.egg-info",
+        "**/.mypy_cache",
+        "**/.pytest_cache",
+        "**/.vscode-server",
+        "archive",
+        "logs",
+        "outputs",
+        "samples",
+        "notebooks",
+        "external",
+        "snapshots",
+        "text-prompts"
+    ],
+    "typeCheckingMode": "off",
+    "reportUndefinedVariable": true,
+    "reportMissingImports": true
+}
