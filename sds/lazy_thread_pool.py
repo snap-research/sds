@@ -66,6 +66,8 @@ class Worker(threading.Thread):
             self.completed_queue.put(result)
             self.task_queue.task_done()
 
+        logger.debug(f"[Worker {self.worker_id}] Stopping worker thread.")
+
 #----------------------------------------------------------------------------
 
 class LazyThreadPool:
@@ -82,6 +84,15 @@ class LazyThreadPool:
         self.num_tasks_scheduled = 0
         self.num_tasks_completed = 0
 
+    def __str__(self):
+        return (
+            f"LazyThreadPool(num_workers={len(self.workers)}, "
+            f"prefetch={self.completed_queue.maxsize}, "
+            f"num_retries={self.num_retries}, "
+            f"num_tasks_scheduled={self.num_tasks_scheduled}, "
+            f"num_tasks_completed={self.num_tasks_completed})"
+        )
+
     def schedule_task(self, task_fn, task_input=None, retries=None):
         if retries is None:
             retries = self.num_retries
@@ -94,8 +105,12 @@ class LazyThreadPool:
     def resume(self):
         self.pause_event.set()
 
-    def shutdown(self):
+    def stop(self):
         self.stop_event.set()
+        self.pause_event.set()
+
+    def shutdown(self):
+        self.stop()
         for worker in self.workers:
             worker.join()
 
@@ -103,9 +118,20 @@ class LazyThreadPool:
         self.shutdown()
 
     def yield_completed(self) -> iter:
-        while not self.completed_queue.empty():
+        """
+        Yields completed task results as they become available.
+
+        This method will block and wait for results to appear in the completed_queue
+        and will yield them one by one until all scheduled tasks have been accounted for.
+        """
+        num_yielded = 0
+        while num_yielded < self.num_tasks_scheduled:
+            # get() is a blocking call. It will wait here indefinitely until a
+            # worker puts a result in the queue. It does NOT depend on timing.
             task_result = self.completed_queue.get()
+            num_yielded += 1
             self.num_tasks_completed += 1 if task_result['success'] else 0
+
             yield task_result
 
     def progress(self) -> dict[str, int]:

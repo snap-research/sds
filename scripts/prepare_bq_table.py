@@ -33,26 +33,7 @@ from genml_training_tools.gcp.credentials import get_default_credentials
 logger = logging.getLogger(__name__)
 logging.getLogger(__name__).setLevel(logging.DEBUG)
 
-
-def s3_key_exists(s3_client, bucket: str, key: str) -> bool:
-    try:
-        s3_client.head_object(Bucket=bucket, Key=key)
-        return True
-    except botocore.exceptions.ClientError as e:
-        if e.response["Error"]["Code"] == "404":
-            return False
-        raise
-
-def upload_lines_to_s3(s3_client, lines: list[str], bucket: str, key: str):
-    local_tmp_path = f"/tmp/{uuid.uuid4().hex}_split_file_paths.txt"
-    with open(local_tmp_path, "w") as f:
-        f.writelines(f"{line}\n" for line in lines)
-
-    with open(local_tmp_path, "rb") as f:
-        s3_client.upload_fileobj(f, bucket, key)
-
-    os.remove(local_tmp_path)
-
+#---------------------------------------------------------------------------
 
 def prepare_bq_tables(
     s3_client,
@@ -65,7 +46,7 @@ def prepare_bq_tables(
     metadata_columns: list[list[str | tuple]] = None,
     metadata_types: list[list[str]] = None,
     metadata_unique_keys: list[str] = None,
-    recompute: bool=True,
+    recompute: bool=False,
 ):
     assert aws_destination_root_dir.startswith("s3://"), "aws_destination_root_dir must start with 's3://'"
     assert gcs_destination_root_dir.startswith("gs://"), "gcs_destination_root_dir must start with 'gs://'"
@@ -121,27 +102,6 @@ def prepare_bq_tables(
 
     return split_file_paths
 
-
-def _generate_add_columns_sql(columns: list[tuple], types: list[str]) -> str:
-    return ", ".join([f"ADD COLUMN {col[1]} {col_type}" for col, col_type in zip(columns, types)]) + ";"
-
-def _generate_update_sql(filtered_table: str, metadata_table: str, columns: list[tuple], unique_key: str) -> str:
-    set_clauses = ", ".join([f"data_table.{col[1]} = metadata_table.{col[0]}" for col in columns])
-    select_cols = ", ".join([col[0] for col in columns])
-
-    return f"""
-    UPDATE {filtered_table} AS data_table
-    SET {set_clauses}
-    FROM (
-        SELECT {unique_key}, {select_cols}
-        FROM (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY {unique_key}) AS rn
-            FROM {metadata_table}
-        )
-        WHERE rn = 1
-    ) AS metadata_table
-    WHERE data_table.data_id = metadata_table.{unique_key};
-    """
 
 def filter_table_and_save(
     bq_client,
@@ -221,6 +181,54 @@ def export_bq_to_s3(
 
     return job_id, s3_full_file_paths
 
+#---------------------------------------------------------------------------
+# S3 utils.
+
+def s3_key_exists(s3_client, bucket: str, key: str) -> bool:
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+        return True
+    except botocore.exceptions.ClientError as e:
+        if e.response["Error"]["Code"] == "404":
+            return False
+        raise
+
+def upload_lines_to_s3(s3_client, lines: list[str], bucket: str, key: str):
+    local_tmp_path = f"/tmp/{uuid.uuid4().hex}_split_file_paths.txt"
+    with open(local_tmp_path, "w") as f:
+        f.writelines(f"{line}\n" for line in lines)
+
+    with open(local_tmp_path, "rb") as f:
+        s3_client.upload_fileobj(f, bucket, key)
+
+    os.remove(local_tmp_path)
+
+#---------------------------------------------------------------------------
+# SQL utils.
+
+def _generate_add_columns_sql(columns: list[tuple], types: list[str]) -> str:
+    return ", ".join([f"ADD COLUMN {col[1]} {col_type}" for col, col_type in zip(columns, types)]) + ";"
+
+def _generate_update_sql(filtered_table: str, metadata_table: str, columns: list[tuple], unique_key: str) -> str:
+    set_clauses = ", ".join([f"data_table.{col[1]} = metadata_table.{col[0]}" for col in columns])
+    select_cols = ", ".join([col[0] for col in columns])
+
+    return f"""
+    UPDATE {filtered_table} AS data_table
+    SET {set_clauses}
+    FROM (
+        SELECT {unique_key}, {select_cols}
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY {unique_key}) AS rn
+            FROM {metadata_table}
+        )
+        WHERE rn = 1
+    ) AS metadata_table
+    WHERE data_table.data_id = metadata_table.{unique_key};
+    """
+
+#---------------------------------------------------------------------------
+# Config utils.
 
 class ScriptConfig(BaseModel):
     bq_project: str
@@ -257,11 +265,7 @@ class ScriptConfig(BaseModel):
                 raise ValueError("Each item in list_of_list_mixed must be a list")
             parsed_sublist = []
             for item in sublist:
-                if (
-                    isinstance(item, str)
-                    and item.startswith("(")
-                    and item.endswith(")")
-                ):
+                if isinstance(item, str) and item.startswith("(") and item.endswith(")"):
                     parsed_sublist.append(tuple(item.strip("()").split(",")))
                 else:
                     parsed_sublist.append(item)
@@ -303,6 +307,7 @@ def prepare_config(config):
     config.metadata_columns = new_metadata_columns
     return config
 
+#---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -324,3 +329,5 @@ if __name__ == "__main__":
         configuration.metadata_types,
         configuration.metadata_unique_keys,
     )
+
+#---------------------------------------------------------------------------

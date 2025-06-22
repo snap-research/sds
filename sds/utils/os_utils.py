@@ -1,0 +1,152 @@
+import os
+import re
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
+
+import boto3
+from tqdm import tqdm
+from streaming.base.storage import CloudDownloader
+
+#---------------------------------------------------------------------------
+
+def find_files_in_src(src: str, exts: set[str], **filtering_kwargs) -> list[str]:
+    if src.startswith("s3://"):
+        return find_files_in_s3_dir(src, exts, **filtering_kwargs)
+    elif src.startswith("/"):
+        assert os.path.isdir(src), f"Source path {src} is not a valid directory."
+        return find_files_in_dir(src, exts, **filtering_kwargs)
+    else:
+        raise ValueError(f"Unsupported source path: {src}. Must be a local directory or S3 URI.")
+
+
+def file_ext(f: str) -> str:
+    return os.path.splitext(f)[1]
+
+
+def file_full_ext(f: str) -> str:
+    basename = os.path.basename(f)
+    parts = basename.split('.')
+    return ('.' + '.'.join(parts[1:])) if len(parts) > 1 else ''
+
+def file_key(f: str) -> str:
+    """File key is the basename without the full extension."""
+    f = f.rstrip('/')
+    basename = os.path.basename(f)
+    ext = file_full_ext(f)
+    return basename[:-len(ext)] if ext else basename
+
+
+def filter_and_format_files(files, dir_path, exts, *, ignore_regex=None, full_path=True, uri_scheme=""):
+    files = [f for f in files if file_ext(f) in exts]
+
+    if ignore_regex:
+        files = [f for f in files if not re.fullmatch(ignore_regex, f)]
+
+    if full_path:
+        files = [os.path.join(dir_path, f) for f in files]
+        if uri_scheme:
+            files = [f"{uri_scheme}://{f}" for f in files]
+
+    return files
+
+
+def find_files_in_dir(path: os.PathLike, exts: set[str], **filtering_kwargs) -> list[str]:
+    path = os.fspath(path)
+    files = [os.path.relpath(os.path.join(r, f), start=path) for r, _, fs in os.walk(path) for f in fs]
+    return filter_and_format_files(files, path, exts, uri_scheme="", **filtering_kwargs)
+
+
+def parallel_download(srcs: list[str], dsts: list[str], skip_if_exists: bool = True, num_workers: int = 16, verbose: bool = False):
+    """
+    Downloads or copies files from source to destination in parallel using
+    a much cleaner `executor.map` approach.
+
+    Args:
+        srcs (list[str]): A list of source file paths (local or S3).
+        dsts (list[str]): A list of corresponding destination file paths.
+        skip_if_exists (bool): If True, skips files where the destination exists.
+        num_workers (int): The number of parallel worker threads.
+    """
+    if len(srcs) != len(dsts):
+        raise ValueError("The number of sources must match the number of destinations.")
+
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        # Use executor.map for a concise and clean way to run tasks in parallel.
+        # tqdm will automatically create a progress bar for the iterator.
+        jobs = executor.map(download_file, srcs, dsts, [skip_if_exists] * len(srcs))
+        jobs = tqdm(jobs, total=len(srcs), desc="Downloading files") if verbose else jobs
+        _results = list(jobs)
+
+
+def download_file(src: str, dst: str, skip_if_exists: bool, ignore_exceptions: bool = False):
+    """
+    Wrapper for a single download/copy task. It checks if the file
+    exists and calls the downloader.
+
+    Returns True if an operation was performed, False if skipped.
+    """
+    if skip_if_exists and is_non_empty_file(dst):
+        return True
+
+    try:
+        CloudDownloader.get(src).direct_download(remote=src, local=dst)
+        return True  # Downloaded/Copied
+    except Exception as e:
+        print(f"Error processing {src} -> {dst}: {e}")
+        if ignore_exceptions:
+            raise
+        else:
+            return False
+
+def is_non_empty_file(path: os.PathLike) -> bool:
+    path = os.fspath(path)
+    return os.path.isfile(path) and os.path.getsize(path) > 0
+
+#---------------------------------------------------------------------------
+# S3 utils.
+
+def aws_s3_list(s3_path, recursive: bool = True):
+    """
+    List S3 objects under a given S3 path.
+
+    Args:
+        s3_path (str): e.g., 's3://my-bucket/path/to/folder'
+        recursive (bool): whether to list recursively or only top-level
+
+    Returns:
+        List[str]: list of full S3 paths (starting with 's3://')
+    """
+    assert s3_path.startswith("s3://")
+    parsed = urlparse(s3_path)
+    bucket = parsed.netloc
+    prefix = parsed.path.lstrip('/')
+
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    operation_parameters = {"Bucket": bucket, "Prefix": prefix}
+    if not recursive:
+        operation_parameters["Delimiter"] = "/"
+
+    paths = []
+    for page in paginator.paginate(**operation_parameters):
+        for obj in page.get("Contents", []):
+            paths.append(f"s3://{bucket}/{obj['Key']}")
+    return paths
+
+
+def find_files_in_s3_dir(s3_path: str, exts: set[str], **filtering_kwargs) -> list[str]:
+    assert s3_path.startswith("s3://")
+    s3 = boto3.client("s3")
+    bucket, *parts = s3_path[5:].split("/")
+    prefix = "/".join(parts).rstrip("/") + "/"
+    files = []
+    paginator = s3.get_paginator("list_objects_v2")
+
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            if not obj["Key"].endswith("/"):
+                files.append(obj["Key"][len(prefix):])
+
+    return filter_and_format_files(files, f"{bucket}/{prefix}", exts, uri_scheme="s3", **filtering_kwargs)
+
+#---------------------------------------------------------------------------
