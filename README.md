@@ -22,6 +22,7 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] Support for data provides as callbacks (possibly via forward/backward translation)
 - [ ] For random access, we might have a problem, when two workers try to access the same file at the same time. We need to implement some kind of locking mechanism?
 - [ ] There is no global shuffling right now, so smth like ImageNet training will be flawed.
+- [ ] Evict samples inside random access queries as well.
 
 # Running tests
 ```bash

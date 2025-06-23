@@ -25,7 +25,7 @@ def test_unpack_sds(src: str, dst: str, data_type: str, **kwargs):
 
     for i, sample in enumerate(dataloader):
         print(sample.keys())
-        sample_id = sample['__key__'][0]
+        sample_id = sample['__sample_key__'][0]
         sample_path = os.path.join(dst, f"sample_{sample_id}.pt")
         # torch.save(sample, sample_path)
         # print(f"Saved sample {sample_id} to {sample_path}")

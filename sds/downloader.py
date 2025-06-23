@@ -42,7 +42,7 @@ class ParallelDownloader:
             f'thread_pool={self.thread_pool}'
         )
 
-    def schedule_task(self, key: int | str, source_urls: list[str], destinations: list[str], blocking: bool=False) -> Any:
+    def schedule_task(self, key: int | str, source_urls: list[str], destinations: list[str], blocking: bool=False) -> float | None:
         downloading_task = DownloadingTask(
             key=key,
             source_urls=source_urls,
@@ -72,21 +72,26 @@ class ParallelDownloader:
 
     def yield_completed_keys(self) -> Generator:
         for result in self.thread_pool.yield_completed():
-            print(f"Download result: {result}")
             if result["success"]:
-                yield result['task_input'].key
+                total_downloaded_size = result['task_output']
+                yield (result['task_input'].key, total_downloaded_size)
             else:
                 logger.error(f"Download failed: {result}")
 
 #----------------------------------------------------------------------------
 
-def run_downloading_task(task: DownloadingTask) -> bool:
+def run_downloading_task(task: DownloadingTask) -> float:
+    """
+    Returns the total size of downloaded files in bytes.
+    """
+    total_size = 0
     for url, dst in zip(task.source_urls, task.destinations):
         prefix = urllib.parse.urlparse(url).scheme
         if task.skip_if_exists and os.path.exists(dst) and os.path.getsize(dst) > 0:
             logger.debug(f"Skipping download of {url} to {dst} as it already exists.")
             continue
         task.downloaders[prefix].download(url, dst, timeout=task.timeout)
-    return os.path.isfile(dst) and os.path.getsize(dst) > 0 # return True if the file was downloaded successfully
+        total_size += os.path.getsize(dst) if os.path.exists(dst) else 0
+    return total_size
 
 #----------------------------------------------------------------------------
