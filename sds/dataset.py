@@ -1,4 +1,5 @@
 import os
+import time
 from typing import Any, Iterator
 from collections import deque
 from collections.abc import Callable
@@ -38,6 +39,8 @@ class StreamingDataset(IterableDataset):
         columns_to_load: list[str] | None=None, # The names of the columns to use from the index file.
         index_col_name: str='index',
         num_downloading_workers: int=4, # The number of workers to use for downloading the samples in parallel.
+        prefetch: int=10, # The number of samples to prefetch in the downloader.
+        num_downloading_retries: int=3, # The number of retries to download a sample if it fails.
         none_to_empty_str: bool=True, # If True, convert None column values to empty strings in the samples.
         cache_limit: str | None='100mb', # The limit of the cache size in bytes. If None, no limit is applied.
     ):
@@ -50,12 +53,15 @@ class StreamingDataset(IterableDataset):
         self.columns_to_yield = columns_to_yield
         self.columns_to_load = columns_to_load
         self.num_downloading_workers = num_downloading_workers
+        self.prefetch = prefetch
+        self.num_downloading_retries = num_downloading_retries
         self.none_to_empty_str = none_to_empty_str
         self.index_col_name = index_col_name
         self._node_cache_limit = bytes_to_int(cache_limit)
         self._worker_cache_limit = None
         self._disk_usage = 0 # Current cache usage in bytes.
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
+        self._gc = os_utils.TimeBasedGarbageCollector(interval_seconds=30)
 
         assert self.index_col_name not in self.columns_to_load, f"Index column {self.index_col_name} cannot be in columns_to_load: {self.columns_to_load}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
@@ -63,7 +69,7 @@ class StreamingDataset(IterableDataset):
         assert self._node_cache_limit > 100_000_000, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
 
         self.epoch = -1
-        self.num_samples_yielded = 0
+        self.num_yielded_samples = 0
 
         self.build_index() # Build the index metadata. TODO: it's slow sometimes, so maybe we should to it lazily.
         self.index = None # Index will be initialized in __iter__(), when we know the workers.
@@ -74,23 +80,25 @@ class StreamingDataset(IterableDataset):
         # A downloader to download the shards in parallel.
         self.downloader = ParallelDownloader(
             num_workers=self.num_downloading_workers,
-            prefetch=self.num_downloading_workers * 10,  # Prefetch a bit more than the number of workers.
-            num_retries=3,
+            prefetch=self.prefetch,  # Prefetch a bit more than the number of workers.
+            num_retries=self.num_downloading_retries,
             skip_if_exists=True,
         )
 
     def build_index(self):
+        now = time.time()
+        logger.debug('Building index...')
         self.index_meta = build_index(self.src, self.dst, self.data_type, self.shuffle_seed) if dist_utils.is_node_leader() else None
         dist_utils.maybe_barrier()
         self.index_meta = dist_utils.broadcast_object_locally(self.index_meta)
-        logger.debug(f'Constructed an index: {self.index_meta}')
+        logger.debug(f'Constructed an index: {self.index_meta}. Took {time.time() - now:.2f} seconds.')
 
     def state_dict(self) -> dict[str, Any]:
-        return {'epoch': self.epoch, 'num_samples_yielded': self.num_samples_yielded}
+        return {'epoch': self.epoch, 'num_yielded_samples': self.num_yielded_samples}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         self.epoch = state_dict['epoch']
-        self.num_samples_yielded = state_dict['num_samples_yielded']
+        self.num_yielded_samples = state_dict['num_yielded_samples']
 
     def __len__(self) -> int:
         return self.index_meta.num_samples
@@ -107,6 +115,7 @@ class StreamingDataset(IterableDataset):
         Note that for an intra-node index, we can only get samples from the current node-level partition only.
         """
         sample_meta = load_index_row(self.index_meta, sample_id).iloc[0].to_dict()
+        print(sample_meta)
         total_size = self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=True)
         sample_meta[SAMPLE_DISK_USAGE_FIELD] = total_size
         # TODO: we need to store self._processed_sample_metas as an in-class property to be able to consider it for eviction.
@@ -116,7 +125,7 @@ class StreamingDataset(IterableDataset):
 
     def _schedule_download_(self, key: int | str, sample_meta: dict[str, Any], blocking: bool=False) -> Any:
         source_urls: list[str] = [sample_meta[col] for col in self.columns_to_load]
-        destinations: list[str] = [os.path.join(self.dst, self.name, sample_meta[self.index_col_name] + os_utils.file_ext(sample_meta[col])) for col in self.columns_to_load]
+        destinations: list[str] = [os.path.join(self.dst, self.name, sample_meta[self.index_col_name] + os_utils.file_ext(sample_meta[col]).lower()) for col in self.columns_to_load]
         downloading_result = self.downloader.schedule_task(
             key=key,
             source_urls=source_urls,
@@ -178,9 +187,9 @@ class StreamingDataset(IterableDataset):
             return
         num_gpu_ranks = dist_utils.get_world_size()
         assert dl_num_workers % num_gpu_ranks == 0, f"Each GPU is expected to have the same amount of DL workers. Found {dl_num_workers} workers for {num_gpu_ranks} GPUs."
-        num_workers_per_node = num_gpu_ranks // dist_utils.get_num_nodes()
+        num_workers_per_node = dl_num_workers // dist_utils.get_num_nodes()
         self._worker_cache_limit = self._node_cache_limit // num_workers_per_node
-        logger.debug(f"Initialized worker cache limit: {self._worker_cache_limit} bytes for rank {dl_worker_rank} with {dl_num_workers} workers.")
+        logger.debug(f"Initialized worker cache limit: {self._worker_cache_limit} bytes for rank {dl_worker_rank} with {dl_num_workers} workers (num_workers_per_node={num_workers_per_node}, num_nodes={dist_utils.get_num_nodes()}).")
 
     def _delete_sample_from_disk(self, sample_meta: dict[str, Any]) -> None:
         assert sample_meta[PROCESSED_FIELD], "Sample must be processed before deletion."
@@ -221,6 +230,8 @@ class StreamingDataset(IterableDataset):
         else:
             sample_ids = list(range(len(self.index)))
 
+        # worker_sample_id_offset = dl_worker_rank * (len(sample_ids) // dl_num_workers)
+        # sample_ids = sample_ids[worker_sample_id_offset:]
         processed_sample_metas: list[dict[str, Any]] = self._schedule_downloads(sample_ids)
 
         for sample_id, total_size in self.downloader.yield_completed_keys():
@@ -230,7 +241,8 @@ class StreamingDataset(IterableDataset):
             self._disk_usage += total_size
             yield self._load_sample(processed_sample_metas[sample_id])
             self._maybe_evict_cold_samples(processed_sample_metas)
-        logger.debug(f"Yielded {self.num_samples_yielded} samples in epoch {self.epoch}.")
+            self._gc.maybe_collect()
+        logger.debug(f"Yielded {self.num_yielded_samples} samples in epoch {self.epoch}.")
         self.downloader.wait_completion()
 
 #----------------------------------------------------------------------------

@@ -68,7 +68,7 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, shuffle_seed:
     elif any(src.endswith(ext) for ext in ['.csv', '.json', '.parquet']): # TODO: process parquet data more intelligently via slicing.
         return build_index_from_index_file(src, dst_dir)
     else:
-        files_list = os_utils.find_files_in_src(src, exts=DATA_TYPE_TO_EXT[data_type])
+        files_list = os_utils.find_files_in_src(src)
         assert files_list, f"No files found in the source {src} for data type {data_type}."
         return build_index_from_files_list(files_list, data_type=data_type, dst_dir=dst_dir)
 
@@ -120,7 +120,6 @@ def build_index_from_index_file(src: str, dst_dir: str) -> IndexMetaData:
     dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(src))
     assert os_utils.download_file(src, dst, skip_if_exists=True), f"Failed to download the index file from {src} to {dst}."
     assert os_utils.is_non_empty_file(dst), f"Failed to download the index file from {src} to {dst}."
-    print('downloaded index file:', src, dst)
 
     # Reading the file.
     src_ext = os_utils.file_ext(src).lower()
@@ -141,17 +140,20 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
     main_files = [f for f in files_list if os_utils.file_ext(f).lower() in DATA_TYPE_TO_EXT[data_type]]
     assert len(main_files) > 0, f"Didnt find any {data_type} files (used extensions: {DATA_TYPE_TO_EXT[data_type]})."
     main_file_keys = set([os_utils.file_key(f) for f in main_files])
+    assert len(main_file_keys) > 0, f"Didnt find any {data_type} files (used extensions: {DATA_TYPE_TO_EXT[data_type]})."
 
     # Now, once we have the main files, we can build the columns.
     # For this, we first want to group the files by their keys using the existing keys as prefixes.
     # We must be careful since some files are named {key}.{ext1}.{ext2}.{...}.json
     data = {k: {} for k in main_file_keys}  # Initialize a dict with keys as the base names of the files.
+    unique_exts = set()
     for file in files_list:
         key = os_utils.file_key(file) # Get the key (base name without extension) of the file.
         full_ext = os_utils.file_full_ext(file).lower() # Get the full extension (e.g., .jpg, .txt, etc.)
         assert key in data, f"Key {key} not found in data."
         assert full_ext not in data[key], f"Duplicate key found: {key} with extension {full_ext}. Please ensure unique keys in the dataset."
-        data[key][full_ext] = file # Store the file path under the key and extension.
+        data[key][full_ext[1:]] = file # Store the file path under the key and extension.
+        unique_exts.add(full_ext)
 
     # Convert the dict to a DataFrame
     INDEX_COL_NAME = 'index'

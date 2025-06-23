@@ -26,6 +26,12 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] Fix TODOs in the codebase.
 - [ ] Remove logging calls from the codebase.
 - [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
+- [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
+- [ ] Shutdown for num_workers > 0 is quite slow. Not sure why.
+- [ ] Clean broken samples from disk.
+- [x] Time-based garbage collection.
+- [ ] State dict management.
+- [ ] Can we construct a remote S3 index in parallel?
 
 # Installation
 

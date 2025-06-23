@@ -82,7 +82,8 @@ class ParallelDownloader:
         self.thread_pool.stop()
 
     def shutdown(self):
-        self.thread_pool.shutdown()
+        if self.thread_pool is not None:
+            self.thread_pool.shutdown()
 
     def yield_completed_keys(self) -> Generator:
         for result in self.thread_pool.yield_completed():
@@ -102,7 +103,6 @@ def run_downloading_task(task: DownloadingTask) -> float:
     for url, dst in zip(task.source_urls, task.destinations):
         prefix = urllib.parse.urlparse(url).scheme
         if task.skip_if_exists and os.path.exists(dst) and os.path.getsize(dst) > 0:
-            logger.debug(f"Skipping download of {url} to {dst} as it already exists.")
             continue
         task.downloaders[prefix].download(url, dst, timeout=task.timeout)
         total_size += os.path.getsize(dst) if os.path.exists(dst) else 0

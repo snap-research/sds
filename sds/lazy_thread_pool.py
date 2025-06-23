@@ -114,10 +114,7 @@ class LazyThreadPool:
     def shutdown(self):
         self.stop()
         for worker in self.workers:
-            worker.join(timeout=0.1)
-
-    # def __del__(self):
-    #     self.shutdown()
+            worker.join(timeout=1)
 
     def clear_pending_tasks(self) -> int:
         """Clears all tasks from the queue that have not yet started executing."""

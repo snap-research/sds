@@ -1,5 +1,7 @@
 import os
 import re
+import gc
+import time
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 
@@ -9,7 +11,7 @@ from streaming.base.storage import CloudDownloader
 
 #---------------------------------------------------------------------------
 
-def find_files_in_src(src: str, exts: set[str], **filtering_kwargs) -> list[str]:
+def find_files_in_src(src: str, exts: set[str]=None, **filtering_kwargs) -> list[str]:
     if src.startswith("s3://"):
         return find_files_in_s3_dir(src, exts, **filtering_kwargs)
     elif src.startswith("/"):
@@ -18,10 +20,8 @@ def find_files_in_src(src: str, exts: set[str], **filtering_kwargs) -> list[str]
     else:
         raise ValueError(f"Unsupported source path: {src}. Must be a local directory or S3 URI.")
 
-
 def file_ext(f: str) -> str:
     return os.path.splitext(f)[1]
-
 
 def file_full_ext(f: str) -> str:
     basename = os.path.basename(f)
@@ -35,9 +35,8 @@ def file_key(f: str) -> str:
     ext = file_full_ext(f)
     return basename[:-len(ext)] if ext else basename
 
-
-def filter_and_format_files(files, dir_path, exts, *, ignore_regex=None, full_path=True, uri_scheme=""):
-    files = [f for f in files if file_ext(f) in exts]
+def filter_and_format_files(files, dir_path, exts=None, ignore_regex=None, full_path=True, uri_scheme=""):
+    files = [f for f in files if file_ext(f).lower() in exts] if exts else files
 
     if ignore_regex:
         files = [f for f in files if not re.fullmatch(ignore_regex, f)]
@@ -49,11 +48,10 @@ def filter_and_format_files(files, dir_path, exts, *, ignore_regex=None, full_pa
 
     return files
 
-
-def find_files_in_dir(path: os.PathLike, exts: set[str], **filtering_kwargs) -> list[str]:
+def find_files_in_dir(path: os.PathLike, exts: set[str]=None, **filtering_kwargs) -> list[str]:
     path = os.fspath(path)
     files = [os.path.relpath(os.path.join(r, f), start=path) for r, _, fs in os.walk(path) for f in fs]
-    return filter_and_format_files(files, path, exts, uri_scheme="", **filtering_kwargs)
+    return filter_and_format_files(files, path, exts=exts, uri_scheme="", **filtering_kwargs)
 
 
 def parallel_download(srcs: list[str], dsts: list[str], skip_if_exists: bool = True, num_workers: int = 16, verbose: bool = False):
@@ -148,5 +146,29 @@ def find_files_in_s3_dir(s3_path: str, exts: set[str], **filtering_kwargs) -> li
                 files.append(obj["Key"][len(prefix):])
 
     return filter_and_format_files(files, f"{bucket}/{prefix}", exts, uri_scheme="s3", **filtering_kwargs)
+
+#---------------------------------------------------------------------------
+
+class TimeBasedGarbageCollector:
+    def __init__(self, interval_seconds: float=None):
+        """
+        Initialize the garbage collector with a specified interval.
+
+        :param interval_seconds: The interval in seconds between each call to gc.collect(). Disabled by default.
+        """
+        self.interval_seconds = interval_seconds if interval_seconds is not None else float('inf')
+        self.last_gc_time = time.time()
+
+    def maybe_collect(self) -> bool:
+        """
+        Check if the interval has passed since the last garbage collection.
+        If so, run gc.collect() and update the last_gc_time.
+        """
+        current_time = time.time()
+        if current_time - self.last_gc_time > self.interval_seconds:
+            gc.collect()
+            self.last_gc_time = current_time
+            return True
+        return False
 
 #---------------------------------------------------------------------------
