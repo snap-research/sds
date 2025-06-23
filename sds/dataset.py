@@ -29,7 +29,7 @@ class StreamingDataset(IterableDataset):
     def __init__(self,
         src: str, # a CSV file path, a JSON file path, or a directory path (possibly remote)
         dst: str, # A local directory path where to store the samples
-        data_type: DataSampleType, # The type of the dataset, e.g. 'csv', 'json', 'parquet', or 'directory'
+        data_type: DataSampleType | str, # The type of the dataset, e.g. 'csv', 'json', 'parquet', or 'directory'
         # local_shm_path: str, # A local file system path which only the workers of the current node can access.
         # global_shm_path: str, # A global file system path which any rank can access globally.
         shuffle_seed: int | None=None, # Shuffle seed for the dataset.
@@ -44,7 +44,7 @@ class StreamingDataset(IterableDataset):
         self.name: str = os_utils.file_key(src)
         self.src: str = src
         self.dst: str = dst
-        self.data_type: DataSampleType = data_type
+        self.data_type: DataSampleType = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
         self.shuffle_seed: int | None = shuffle_seed
         self.data_processing_callbacks = data_processing_callbacks or []
         self.columns_to_yield = columns_to_yield
@@ -61,15 +61,11 @@ class StreamingDataset(IterableDataset):
         assert self.columns_to_load is not None and len(self.columns_to_load) > 0, f"Need to specify columns_to_load, but got {self.columns_to_load}."
         assert self._cache_limit > 100_000_000, f"Cache limit {self._cache_limit} is too small, must be at least 100MB."
 
-        self.index_meta = build_index(src, dst, self.data_type, self.shuffle_seed) if dist_utils.is_node_leader() else None
-        dist_utils.maybe_barrier()
-        self.index_meta = dist_utils.broadcast_object_locally(self.index_meta)
         self.epoch = -1
         self.num_samples_yielded = 0
-        logger.debug(f'Constructed an index: {self.index_meta}')
 
-        # Index will be initialized in __iter__(), when we know the workers.
-        self.index = None
+        self.build_index() # Build the index metadata. TODO: it's slow sometimes, so maybe we should to it lazily.
+        self.index = None # Index will be initialized in __iter__(), when we know the workers.
 
         self._executor: ThreadPoolExecutor | None = None # A background thread to do call downloading/deletion to not block the main thread.
         self._crash_event: Event | None = None  # An event to signal if the background thread has crashed.
@@ -81,6 +77,12 @@ class StreamingDataset(IterableDataset):
             num_retries=3,
             skip_if_exists=True,
         )
+
+    def build_index(self):
+        self.index_meta = build_index(self.src, self.dst, self.data_type, self.shuffle_seed) if dist_utils.is_node_leader() else None
+        dist_utils.maybe_barrier()
+        self.index_meta = dist_utils.broadcast_object_locally(self.index_meta)
+        logger.debug(f'Constructed an index: {self.index_meta}')
 
     def state_dict(self) -> dict[str, Any]:
         return {'epoch': self.epoch, 'num_samples_yielded': self.num_samples_yielded}
@@ -182,7 +184,9 @@ class StreamingDataset(IterableDataset):
             self.downloader.shutdown()
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        if self.downloader is not None:
+        if self.downloader.thread_pool is None:
+            self.downloader.init_thread_pool()
+        else:
             self.downloader.clear_pending_downloads()
             # TODO: this looks like a bug.
             self._disk_usage = 0

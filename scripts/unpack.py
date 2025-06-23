@@ -21,14 +21,12 @@ def test_unpack_sds(src: str, dst: str, data_type: str, **kwargs):
         **kwargs,
     )
 
-    os.makedirs(dst, exist_ok=True)
-
     for _ in range(3):
         for i in random.sample(list(range(len(dataset))), min(3, len(dataset))):
             sample = dataset[i]
             print(f'random access {i}', sample.keys())
 
-        dataloader = StreamingDataLoader(dataset, batch_size=1, num_workers=0, shuffle=False)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=3)
         for i, sample in enumerate(dataloader):
             print(sample.keys())
             sample_id = sample['__sample_key__'][0]
@@ -36,6 +34,7 @@ def test_unpack_sds(src: str, dst: str, data_type: str, **kwargs):
             if i > 100:
                 print('Stopping after 100 samples.')
                 break
+        # os.makedirs(dst, exist_ok=True)
         # torch.save(sample, sample_path)
         # print(f"Saved sample {sample_id} to {sample_path}")
 

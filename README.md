@@ -3,9 +3,9 @@
 A streaming dataset lib which loads data in a streaming fashion:
 - Data samples (+ possibly their metadata) are stored as raw files
 - The dataset downloads and yields them on the fly
-- Supports constructing the dataset from a CSV table or just a file directory (possibly a remote one --- e.g., from S3)
-- Works with images and videos
-- Random access
+- Supports constructing the dataset from a CSV/parquet/json index, file directory, CSV/parquet/json wildcard or "`split_file_texts.txt`"
+- Decodes images/videos/audios through sample data processing callbacks (could be easily extended)
+- Supports
 
 # TODO
 - [x] Index construction
@@ -24,8 +24,35 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] Evict samples inside random access queries as well.
 - [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
 - [ ] Fix TODOs in the codebase.
+- [ ] Remove logging calls from the codebase.
+- [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
 
-# Running a simple demo
+# Installation
+
+```bash
+pip install mosaicml-streaming beartype pytest torch torchvision torchaudio
+```
+
+# Usage
+## Basic usage
+```python
+from sds.dataset import StreamingDataset
+dataset = StreamingDataset(
+    src='s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet',
+    dst='ignore/tmp',
+    data_type='image',
+    columns_to_load=['data_url'],
+    index_col_name='data_id',
+    num_downloading_workers=10,
+)
+sample = dataset[0] # Downloads (with blocking) the sample and returns it
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=3, shuffle=False)
+for batch in dataloader: # Loads samples in parallel.
+    print(batch.keys())
+```
+
+
+## Running a simple demo
 ```bash
 python scripts/unpack.py s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet ignore/tmp --columns_to_load data_url --index_col_name data_id --num_downloading_workers 10
 ```

@@ -24,15 +24,20 @@ class DownloadingTask:
 class ParallelDownloader:
     """The downloader can also pseudo-download stuff so that we have a unified interface."""
     def __init__(self, num_workers: int = 4, prefetch: int = 10, num_retries: int = 3, skip_if_exists: bool = True):
-        self.thread_pool = LazyThreadPool(
-            num_workers=num_workers,
-            prefetch=prefetch,
-            num_retries=num_retries,
-        )
         self.downloaders = {} # We assume that all of the downloaders are thread-safe.
+        self.num_workers = num_workers
         self.prefetch = prefetch
         self.num_retries = num_retries
         self.skip_if_exists = skip_if_exists
+        self.thread_pool: LazyThreadPool = None
+
+    def init_thread_pool(self):
+        assert self.thread_pool is None, "Thread pool is already initialized."
+        self.thread_pool = LazyThreadPool(
+            num_workers=self.num_workers,
+            prefetch=self.prefetch,
+            num_retries=self.num_retries,
+        )
 
     def __str__(self):
         return (

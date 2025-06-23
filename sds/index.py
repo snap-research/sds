@@ -21,7 +21,14 @@ import sds.utils.data_utils as data_utils
 #---------------------------------------------------------------------------
 # Data structures and constants for the index.
 
-INDEX_TYPE = Enum('IndexType', ['INTER_NODE', 'INTRA_NODE'])
+class IndexType(Enum):
+    INTER_NODE = 'INTER_NODE'
+    INTRA_NODE = 'INTRA_NODE'
+
+    # You can add this for a friendlier string representation
+    def __str__(self):
+        return self.value
+
 INDEX_FILE_NAME = 'index.parquet' # The name of the index file to be saved on disk.
 RAW_INDEX_FILES_DIR = 'raw_index_files' # The directory where raw index files will be saved.
 
@@ -29,7 +36,7 @@ RAW_INDEX_FILES_DIR = 'raw_index_files' # The directory where raw index files wi
 class IndexMetaData:
     num_samples: int
     path: str
-    index_type: INDEX_TYPE # This affects how we slice the data across nodes and ranks.
+    index_type: IndexType # This affects how we slice the data across nodes and ranks.
 
 #---------------------------------------------------------------------------
 
@@ -100,7 +107,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int)
     df = pd.concat((pd.read_csv(f) for f in dst_files_list), ignore_index=True)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     df.to_parquet(index_dst, index=False)
-    index_meta = IndexMetaData(len(df), index_dst, INDEX_TYPE.INTRA_NODE)  # Placeholder for the actual number of samples.
+    index_meta = IndexMetaData(len(df), index_dst, IndexType.INTRA_NODE)  # Placeholder for the actual number of samples.
 
     return index_meta
 
@@ -125,7 +132,7 @@ def build_index_from_index_file(src: str, dst_dir: str) -> IndexMetaData:
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     df.to_parquet(index_dst, index=False)
 
-    return IndexMetaData(len(df), index_dst, INDEX_TYPE.INTER_NODE)
+    return IndexMetaData(len(df), index_dst, IndexType.INTER_NODE)
 
 
 def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType) -> IndexMetaData:
@@ -149,7 +156,7 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
     df = pd.DataFrame.from_dict(data, orient='index').reset_index(names=INDEX_COL_NAME)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     data_utils.save_polars_parquet(df, index_dst)
-    index_meta = IndexMetaData(len(df), index_dst, INDEX_TYPE.INTER_NODE)
+    index_meta = IndexMetaData(len(df), index_dst, IndexType.INTER_NODE)
 
     return index_meta
 
