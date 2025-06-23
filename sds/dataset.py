@@ -52,14 +52,15 @@ class StreamingDataset(IterableDataset):
         self.num_downloading_workers = num_downloading_workers
         self.none_to_empty_str = none_to_empty_str
         self.index_col_name = index_col_name
-        self._cache_limit = bytes_to_int(cache_limit)
+        self._node_cache_limit = bytes_to_int(cache_limit)
+        self._worker_cache_limit = None
         self._disk_usage = 0 # Current cache usage in bytes.
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
 
         assert self.index_col_name not in self.columns_to_load, f"Index column {self.index_col_name} cannot be in columns_to_load: {self.columns_to_load}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
         assert self.columns_to_load is not None and len(self.columns_to_load) > 0, f"Need to specify columns_to_load, but got {self.columns_to_load}."
-        assert self._cache_limit > 100_000_000, f"Cache limit {self._cache_limit} is too small, must be at least 100MB."
+        assert self._node_cache_limit > 100_000_000, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
 
         self.epoch = -1
         self.num_samples_yielded = 0
@@ -164,12 +165,22 @@ class StreamingDataset(IterableDataset):
         return sample_data
 
     def _maybe_evict_cold_samples(self, processed_sample_metas: dict[str, Any]) -> bool:
-        while self._disk_usage > self._cache_limit:
-            assert len(self._stored_sample_ids) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._cache_limit}."
+        assert self._worker_cache_limit is not None, "Worker cache limit must be set before eviction."
+        while self._disk_usage > self._worker_cache_limit:
+            assert len(self._stored_sample_ids) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._worker_cache_limit}."
             sample_id = self._stored_sample_ids.popleft() # Get the oldest sample key to evict.
             self._delete_sample_from_disk(processed_sample_metas[sample_id])
             self._disk_usage -= processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD]
-            logger.debug(f"Current disk usage: {self._disk_usage} bytes, cache limit: {self._cache_limit} bytes.")
+            logger.debug(f"Current disk usage: {self._disk_usage} bytes, cache limit: {self._worker_cache_limit} bytes.")
+
+    def _maybe_init_worker_cache_limit(self, dl_worker_rank: int, dl_num_workers: int) -> None:
+        if self._worker_cache_limit is not None:
+            return
+        num_gpu_ranks = dist_utils.get_world_size()
+        assert dl_num_workers % num_gpu_ranks == 0, f"Each GPU is expected to have the same amount of DL workers. Found {dl_num_workers} workers for {num_gpu_ranks} GPUs."
+        num_workers_per_node = num_gpu_ranks // dist_utils.get_num_nodes()
+        self._worker_cache_limit = self._node_cache_limit // num_workers_per_node
+        logger.debug(f"Initialized worker cache limit: {self._worker_cache_limit} bytes for rank {dl_worker_rank} with {dl_num_workers} workers.")
 
     def _delete_sample_from_disk(self, sample_meta: dict[str, Any]) -> None:
         assert sample_meta[PROCESSED_FIELD], "Sample must be processed before deletion."
@@ -193,6 +204,7 @@ class StreamingDataset(IterableDataset):
             self._stored_sample_ids.clear()
 
         dl_worker_rank, dl_num_workers = dist_utils.get_safe_worker_info()
+        self._maybe_init_worker_cache_limit(dl_worker_rank, dl_num_workers)
         if self.index is None:
             self.index = load_index_slice(self.index_meta, dl_worker_rank, dl_num_workers)
         self.epoch += 1 # TODO: this would be incrementing the epoch each time a new dataloader is called over the dataset, which is not good.

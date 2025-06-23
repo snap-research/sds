@@ -6,6 +6,7 @@ import random
 from dataclasses import dataclass
 from enum import Enum
 
+import numpy as np
 import torch
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -95,7 +96,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int)
     # We distribute the data across nodes on a per-file basis instead of per-sample basis. This mainly affects shuffling.
     node_rank = dist_utils.get_node_rank()
     num_files_per_node = len(files_list) // dist_utils.get_num_nodes()
-    random.RandomState(shuffle_seed).shuffle(files_list)  # Shuffle the files list for randomness.
+    np.random.RandomState(shuffle_seed).shuffle(files_list)  # Shuffle the files list for randomness.
     cur_node_files_list = files_list[node_rank * num_files_per_node:(node_rank + 1) * num_files_per_node]
 
     # Now, we need to download them in parallel and save as a unified parquet file.
@@ -104,7 +105,8 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int)
 
     # Now, we can concatenate the data from all the files into a single DataFrame.
     # downloaded_filesfiles = glob.glob(os.path.join(dst_dir, RAW_INDEX_FILES_DIR, f'*{src_ext}'))
-    df = pd.concat((pd.read_csv(f) for f in dst_files_list), ignore_index=True)
+    reader = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': lambda *args, **kwargs: pq.read_table(*args, **kwargs).to_pandas()}[src_ext]
+    df = pd.concat((reader(f) for f in dst_files_list), ignore_index=True)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     df.to_parquet(index_dst, index=False)
     index_meta = IndexMetaData(len(df), index_dst, IndexType.INTRA_NODE)  # Placeholder for the actual number of samples.
@@ -121,7 +123,7 @@ def build_index_from_index_file(src: str, dst_dir: str) -> IndexMetaData:
     print('downloaded index file:', src, dst)
 
     # Reading the file.
-    src_ext = os.path.splitext(src)[1].lower()
+    src_ext = os_utils.file_ext(src).lower()
     reader = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': pq.read_table}[src_ext]
     df = reader(dst)
     if isinstance(df, pa.Table):
