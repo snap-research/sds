@@ -25,6 +25,11 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
 - [ ] Fix TODOs in the codebase.
 
+# Running a simple demo
+```bash
+python scripts/unpack.py s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet ignore/tmp --columns_to_load data_url --index_col_name data_id --num_downloading_workers 10
+```
+
 # Running tests
 ```bash
 PYTHONPATH=. pytest tests
