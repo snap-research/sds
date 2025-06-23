@@ -3,6 +3,7 @@ A simple script to test the global logic of the Streaming Dataset.
 It launched the dataset and stores the samples in a local directory.
 """
 import os
+import random
 import argparse
 
 import torch
@@ -19,14 +20,22 @@ def test_unpack_sds(src: str, dst: str, data_type: str, **kwargs):
         data_type=DataSampleType.from_str(data_type),
         **kwargs,
     )
-    dataloader = StreamingDataLoader(dataset, batch_size=1, num_workers=0, shuffle=False)
 
     os.makedirs(dst, exist_ok=True)
 
-    for i, sample in enumerate(dataloader):
-        print(sample.keys())
-        sample_id = sample['__sample_key__'][0]
-        sample_path = os.path.join(dst, f"sample_{sample_id}.pt")
+    for _ in range(3):
+        for i in random.sample(list(range(len(dataset))), min(3, len(dataset))):
+            sample = dataset[i]
+            print(f'random access {i}', sample.keys())
+
+        dataloader = StreamingDataLoader(dataset, batch_size=1, num_workers=0, shuffle=False)
+        for i, sample in enumerate(dataloader):
+            print(sample.keys())
+            sample_id = sample['__sample_key__'][0]
+            sample_path = os.path.join(dst, f"sample_{sample_id}.pt")
+            if i > 100:
+                print('Stopping after 100 samples.')
+                break
         # torch.save(sample, sample_path)
         # print(f"Saved sample {sample_id} to {sample_path}")
 

@@ -12,17 +12,18 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] Dataset iterator
 - [x] Shuffling each epoch
 - [ ] Lazy index so that we can efficiently initialize large datasets on a single node without hitting disk space limits
-- [ ] Cache data + evict cold samples
+- [x] Cache data + evict cold samples
 - [ ] Video decoding
 - [ ] Audio loading
 - [ ] Tutorial/usage examples
 - [ ] Resumal logic
 - [ ] More test coverage
 - [ ] Documentation
-- [ ] Support for data provides as callbacks (possibly via forward/backward translation)
-- [ ] For random access, we might have a problem, when two workers try to access the same file at the same time. We need to implement some kind of locking mechanism?
+- [x] Support for data provides as callbacks (possibly via forward/backward translation)
 - [ ] There is no global shuffling right now, so smth like ImageNet training will be flawed.
 - [ ] Evict samples inside random access queries as well.
+- [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
+- [ ] Fix TODOs in the codebase.
 
 # Running tests
 ```bash

@@ -18,6 +18,7 @@ class Worker(threading.Thread):
             completed_queue,
             pause_event,
             stop_event,
+            task_wait_timeout: float = 0.1,
         ):
         super().__init__()
 
@@ -26,6 +27,7 @@ class Worker(threading.Thread):
         self.completed_queue = completed_queue
         self.pause_event = pause_event
         self.stop_event = stop_event
+        self.task_wait_timeout = task_wait_timeout
         self.daemon = True
         self.start()
 
@@ -36,7 +38,7 @@ class Worker(threading.Thread):
             self.pause_event.wait()
             if not is_retrying_prev_task:
                 try:
-                    task_fn, task_input, num_retries_left = self.task_queue.get(timeout=1)
+                    task_fn, task_input, num_retries_left = self.task_queue.get(timeout=self.task_wait_timeout)
                 except queue.Empty:
                     continue
 
@@ -112,10 +114,30 @@ class LazyThreadPool:
     def shutdown(self):
         self.stop()
         for worker in self.workers:
-            worker.join()
+            worker.join(timeout=0.1)
 
-    def __del__(self):
-        self.shutdown()
+    # def __del__(self):
+    #     self.shutdown()
+
+    def clear_pending_tasks(self) -> int:
+        """Clears all tasks from the queue that have not yet started executing."""
+        num_cleared = 0
+        while not self.task_queue.empty():
+            try:
+                self.task_queue.get_nowait() # Use get_nowait() to avoid blocking.
+                self.task_queue.task_done() # Must call task_done() to keep the queue's internal counter correct for wait_completion().
+                num_cleared += 1
+            except queue.Empty:
+                # This handles a rare race condition where the queue becomes
+                # empty between the .empty() check and the .get_nowait() call.
+                break
+
+        if num_cleared > 0:
+            # Adjust the scheduled count so that yield_completed() does not wait for tasks that will never arrive.
+            self.num_tasks_scheduled -= num_cleared
+            logger.info(f"Cleared {num_cleared} pending tasks from the queue.")
+
+        return num_cleared
 
     def yield_completed(self) -> iter:
         """

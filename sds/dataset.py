@@ -1,9 +1,9 @@
 import os
 from typing import Any, Iterator
+from collections import deque
 from collections.abc import Callable
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor
-from queue import Queue
 
 from torch.utils.data import IterableDataset
 from loguru import logger
@@ -54,7 +54,7 @@ class StreamingDataset(IterableDataset):
         self.index_col_name = index_col_name
         self._cache_limit = bytes_to_int(cache_limit)
         self._disk_usage = 0 # Current cache usage in bytes.
-        self._stored_sample_keys: Queue[int | str] = [] # A list of keys physicall stored on disk.
+        self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
 
         assert self.index_col_name not in self.columns_to_load, f"Index column {self.index_col_name} cannot be in columns_to_load: {self.columns_to_load}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
@@ -73,7 +73,14 @@ class StreamingDataset(IterableDataset):
 
         self._executor: ThreadPoolExecutor | None = None # A background thread to do call downloading/deletion to not block the main thread.
         self._crash_event: Event | None = None  # An event to signal if the background thread has crashed.
-        self.downloader: ParallelDownloader | None = None # A downloader to download the shards in parallel.
+
+        # A downloader to download the shards in parallel.
+        self.downloader = ParallelDownloader(
+            num_workers=self.num_downloading_workers,
+            prefetch=self.num_downloading_workers * 10,  # Prefetch a bit more than the number of workers.
+            num_retries=3,
+            skip_if_exists=True,
+        )
 
     def state_dict(self) -> dict[str, Any]:
         return {'epoch': self.epoch, 'num_samples_yielded': self.num_samples_yielded}
@@ -96,11 +103,12 @@ class StreamingDataset(IterableDataset):
         Get sample by global index, blocking to download it.
         Note that for an intra-node index, we can only get samples from the current node-level partition only.
         """
-        sample_meta = load_index_row(self.index_meta, sample_id).to_dict()
-        key, total_size = self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=True)
+        sample_meta = load_index_row(self.index_meta, sample_id).iloc[0].to_dict()
+        total_size = self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=True)
         sample_meta[SAMPLE_DISK_USAGE_FIELD] = total_size
-        self._stored_sample_keys.append(key)
-        self._disk_usage += total_size
+        # TODO: we need to store self._processed_sample_metas as an in-class property to be able to consider it for eviction.
+        # self._stored_sample_ids.append(sample_id)
+        # self._disk_usage += total_size
         return self._load_sample(sample_meta)
 
     def _schedule_download_(self, key: int | str, sample_meta: dict[str, Any], blocking: bool=False) -> Any:
@@ -155,10 +163,10 @@ class StreamingDataset(IterableDataset):
 
     def _maybe_evict_cold_samples(self, processed_sample_metas: dict[str, Any]) -> bool:
         while self._disk_usage > self._cache_limit:
-            assert len(self._stored_sample_keys) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._cache_limit}."
-            sample_key = self._stored_sample_keys.pop(0)  # Get the oldest sample.
-            self._delete_sample_from_disk(processed_sample_metas[sample_key])
-            self._disk_usage -= processed_sample_metas[sample_key][SAMPLE_DISK_USAGE_FIELD]
+            assert len(self._stored_sample_ids) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._cache_limit}."
+            sample_id = self._stored_sample_ids.popleft() # Get the oldest sample key to evict.
+            self._delete_sample_from_disk(processed_sample_metas[sample_id])
+            self._disk_usage -= processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD]
             logger.debug(f"Current disk usage: {self._disk_usage} bytes, cache limit: {self._cache_limit} bytes.")
 
     def _delete_sample_from_disk(self, sample_meta: dict[str, Any]) -> None:
@@ -169,10 +177,16 @@ class StreamingDataset(IterableDataset):
             os.remove(file_path)
             logger.debug(f"Deleted file {file_path} for sample {sample_meta[self.index_col_name]}.")
 
+    def __del__(self):
+        if self.downloader is not None:
+            self.downloader.shutdown()
+
     def __iter__(self) -> Iterator[dict[str, Any]]:
         if self.downloader is not None:
-            self.downloader.stop().wait_completion()
-            self.downloader = None
+            self.downloader.clear_pending_downloads()
+            # TODO: this looks like a bug.
+            self._disk_usage = 0
+            self._stored_sample_ids.clear()
 
         dl_worker_rank, dl_num_workers = dist_utils.get_safe_worker_info()
         if self.index is None:
@@ -191,21 +205,14 @@ class StreamingDataset(IterableDataset):
         else:
             sample_ids = list(range(len(self.index)))
 
-        self.downloader = ParallelDownloader(
-            num_workers=self.num_downloading_workers,
-            prefetch=self.num_downloading_workers * 10,  # Prefetch a bit more than the number of workers.
-            num_retries=3,
-            skip_if_exists=True,
-        )
-
         processed_sample_metas: list[dict[str, Any]] = self._schedule_downloads(sample_ids)
 
-        for key, total_size in self.downloader.yield_completed_keys():
-            logger.debug(f"Processing sample {key}...")
-            processed_sample_metas[key][SAMPLE_DISK_USAGE_FIELD] = total_size
-            self._stored_sample_keys.append(key)
+        for sample_id, total_size in self.downloader.yield_completed_keys():
+            logger.debug(f"Processing sample {sample_id}...")
+            processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD] = total_size
+            self._stored_sample_ids.append(sample_id)
             self._disk_usage += total_size
-            yield self._load_sample(processed_sample_metas[key])
+            yield self._load_sample(processed_sample_metas[sample_id])
             self._maybe_evict_cold_samples(processed_sample_metas)
         logger.debug(f"Yielded {self.num_samples_yielded} samples in epoch {self.epoch}.")
         self.downloader.wait_completion()

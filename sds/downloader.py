@@ -66,9 +66,18 @@ class ParallelDownloader:
                 retries=self.num_retries,
             )
 
+    def clear_pending_downloads(self):
+        self.thread_pool.clear_pending_tasks()
+
     def wait_completion(self):
         self.thread_pool.wait_completion()
         logger.debug(f"All download tasks completed. {self.thread_pool.num_tasks_completed} tasks completed out of {self.thread_pool.num_tasks_scheduled} scheduled.")
+
+    def stop(self):
+        self.thread_pool.stop()
+
+    def shutdown(self):
+        self.thread_pool.shutdown()
 
     def yield_completed_keys(self) -> Generator:
         for result in self.thread_pool.yield_completed():
