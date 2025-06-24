@@ -31,8 +31,8 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [x] Clean broken samples from disk.
 - [x] Time-based garbage collection.
 - [ ] State dict management.
-- [ ] Can we construct a remote S3 index in parallel?
-- [ ] Construct an index for a local/remote directory.
+- [x] Can we construct a remote S3 index in parallel?
+- [x] Construct an index for a local/remote directory.
 
 # Installation
 
@@ -58,13 +58,22 @@ for batch in dataloader: # Loads samples in parallel.
     print(batch.keys())
 ```
 
-
 ## Running a simple demo
 ```bash
 python scripts/unpack.py s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet ignore/tmp --columns_to_load data_url --index_col_name data_id --num_downloading_workers 10
 ```
 
-# Running tests
+## Constructing an index
+When training on files list directory (remote or local), it's recommended to precompute the index so that we don't need to scan the directory each time.
+You can use a command like this to do that:
+```bash
+python scripts/construct_index.py --src s3://snap-genvid/datasets/tmp/ --dst s3://snap-genvid/datasets/tmp-index.csv --tmp_dir ignore/tmp --data_type image
+```
+After the index is constructed, you can simply replace your `src` argument with the index file path, e.g. `s3://snap-genvid/datasets/tmp-index.csv`.
+
+
+# Development
+## Running tests
 ```bash
 PYTHONPATH=. pytest tests
 ```
