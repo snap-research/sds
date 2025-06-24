@@ -16,7 +16,7 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] Video decoding
 - [ ] Audio loading
 - [ ] Tutorial/usage examples
-- [ ] Resumal logic
+- [ ] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
 - [ ] More test coverage
 - [ ] Documentation
 - [x] Support for data provides as callbacks (possibly via forward/backward translation)
@@ -28,10 +28,11 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
 - [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
 - [ ] Shutdown for num_workers > 0 is quite slow. Not sure why.
-- [ ] Clean broken samples from disk.
+- [x] Clean broken samples from disk.
 - [x] Time-based garbage collection.
 - [ ] State dict management.
 - [ ] Can we construct a remote S3 index in parallel?
+- [ ] Construct an index for a local/remote directory.
 
 # Installation
 

@@ -85,6 +85,17 @@ class ParallelDownloader:
         if self.thread_pool is not None:
             self.thread_pool.shutdown()
 
+    def _clean_failed_download(self, downloading_task: DownloadingTask):
+        """
+        Cleans up the failed download by removing the destination files.
+        """
+        for dst in downloading_task.destinations:
+            if os.path.exists(dst):
+                try:
+                    os.remove(dst)
+                except Exception as e:
+                    logger.error(f"Failed to remove file {dst}: {e}")
+
     def yield_completed_keys(self) -> Generator:
         for result in self.thread_pool.yield_completed():
             if result["success"]:
@@ -92,6 +103,7 @@ class ParallelDownloader:
                 yield (result['task_input'].key, total_downloaded_size)
             else:
                 logger.error(f"Download failed: {result}")
+                self._clean_failed_download(result['task_input'])
 
 #----------------------------------------------------------------------------
 
