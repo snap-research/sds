@@ -4,7 +4,7 @@ from PIL import Image
 
 #---------------------------------------------------------------------------
 
-TICK = 60 # seconds
+DEFAULT_TIMEOUT = 60.0 # In seconds.
 
 #---------------------------------------------------------------------------
 # Data-related constants and types.

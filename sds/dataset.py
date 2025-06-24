@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 from torch.utils.data import IterableDataset
 from loguru import logger
-from streaming.base.util import bytes_to_int
 
 from sds.downloader import ParallelDownloader
 from sds.utils.misc import pseudo_shuffle
@@ -57,7 +56,7 @@ class StreamingDataset(IterableDataset):
         self.num_downloading_retries = num_downloading_retries
         self.none_to_empty_str = none_to_empty_str
         self.index_col_name = index_col_name
-        self._node_cache_limit = bytes_to_int(cache_limit)
+        self._node_cache_limit = os_utils.bytes_to_int(cache_limit)
         self._worker_cache_limit = None
         self._disk_usage = 0 # Current cache usage in bytes.
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.

@@ -12,7 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
 import polars as pl
-from streaming.base.storage import CloudDownloader
+from sds.utils.download import CloudDownloader
 
 from sds.structs import DataSampleType, DATA_TYPE_TO_EXT
 import sds.utils.distributed as dist_utils

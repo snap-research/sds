@@ -4,7 +4,7 @@ from typing import Generator, Any
 from dataclasses import dataclass
 
 from loguru import logger
-from streaming.base.storage import CloudDownloader
+from sds.utils.download import CloudDownloader
 
 from sds.lazy_thread_pool import LazyThreadPool
 

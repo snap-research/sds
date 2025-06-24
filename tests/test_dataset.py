@@ -6,23 +6,6 @@ from unittest.mock import patch, MagicMock, mock_open
 
 import pandas as pd
 
-# This section defines all the mock objects and classes that will be used
-# to replace the real dependencies of the Dataset.
-
-class MockWorld:
-    """A mock for streaming.base.world.World."""
-    def __init__(self, num_workers=1, worker=0):
-        self.num_workers = num_workers
-        self.worker = worker
-
-    @staticmethod
-    def detect():
-        return MockWorld()
-
-    @staticmethod
-    def detect_workers():
-        return MockWorld()
-
 class MockParallelDownloader:
     """A mock for sds.downloader.ParallelDownloader."""
     def __init__(self, *args, **kwargs):
@@ -32,7 +15,6 @@ class MockParallelDownloader:
         self.wait_completion = MagicMock()
 
 # Mocks for entire modules
-mock_streaming_base_world = MagicMock(World=MockWorld)
 mock_sds_downloader = MagicMock(ParallelDownloader=MockParallelDownloader)
 mock_sds_utils_distributed = MagicMock(
     is_node_leader=MagicMock(return_value=True),
@@ -54,8 +36,6 @@ def dataset_class():
     mock_sds_utils.distributed = mock_sds_utils_distributed
 
     with patch.dict('sys.modules', {
-        # We still mock the world to control worker detection
-        'streaming.base.world': mock_streaming_base_world,
         # Other external dependencies are still mocked
         'sds.downloader': mock_sds_downloader,
         'sds.utils': mock_sds_utils, # Mock the parent package
