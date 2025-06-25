@@ -1,6 +1,7 @@
 import os
 import time
-from typing import Any, Iterator
+import types
+from typing import Any, Iterator, Generator
 from collections import deque
 from collections.abc import Callable
 from threading import Event
@@ -11,7 +12,7 @@ from loguru import logger
 
 from sds.downloader import ParallelDownloader
 from sds.utils.misc import pseudo_shuffle
-from sds.structs import DataSampleType
+from sds.structs import DataSampleType, SampleData, SampleTransform
 from sds.index import build_index, load_index_slice, load_index_row
 import sds.utils.distributed as dist_utils
 import sds.utils.os_utils as os_utils
@@ -33,9 +34,8 @@ class StreamingDataset(IterableDataset):
         # local_shm_path: str, # A local file system path which only the workers of the current node can access.
         # global_shm_path: str, # A global file system path which any rank can access globally.
         shuffle_seed: int | None=None, # Shuffle seed for the dataset.
-        data_processing_callbacks: list[Callable]=None, # A list of data augmentation callbacks to apply to the samples.
-        columns_to_yield: list[str] | None=None, # The names of the columns to use from the index file.
-        columns_to_load: list[str] | None=None, # The names of the columns to use from the index file.
+        transforms: list[Callable]=None, # A list of data augmentation callbacks to apply to the samples.
+        columns_to_download: list[str] | None=None, # The names of the columns to use from the index file.
         index_col_name: str='index',
         num_downloading_workers: int=4, # The number of workers to use for downloading the samples in parallel.
         prefetch: int=10, # The number of samples to prefetch in the downloader.
@@ -48,9 +48,8 @@ class StreamingDataset(IterableDataset):
         self.dst: str = dst
         self.data_type: DataSampleType = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
         self.shuffle_seed: int | None = shuffle_seed
-        self.data_processing_callbacks = data_processing_callbacks or []
-        self.columns_to_yield = columns_to_yield
-        self.columns_to_load = columns_to_load
+        self.transforms = transforms or []
+        self.columns_to_download = columns_to_download
         self.num_downloading_workers = num_downloading_workers
         self.prefetch = prefetch
         self.num_downloading_retries = num_downloading_retries
@@ -62,9 +61,9 @@ class StreamingDataset(IterableDataset):
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
         self._gc = os_utils.TimeBasedGarbageCollector(interval_seconds=30)
 
-        assert self.index_col_name not in self.columns_to_load, f"Index column {self.index_col_name} cannot be in columns_to_load: {self.columns_to_load}."
+        assert self.index_col_name not in self.columns_to_download, f"Index column {self.index_col_name} cannot be in columns_to_download: {self.columns_to_download}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
-        assert self.columns_to_load is not None and len(self.columns_to_load) > 0, f"Need to specify columns_to_load, but got {self.columns_to_load}."
+        assert self.columns_to_download is not None and len(self.columns_to_download) > 0, f"Need to specify columns_to_download, but got {self.columns_to_download}."
         assert self._node_cache_limit > 100_000_000, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
 
         self.epoch = -1
@@ -114,17 +113,16 @@ class StreamingDataset(IterableDataset):
         Note that for an intra-node index, we can only get samples from the current node-level partition only.
         """
         sample_meta = load_index_row(self.index_meta, sample_id).iloc[0].to_dict()
-        print(sample_meta)
         total_size = self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=True)
         sample_meta[SAMPLE_DISK_USAGE_FIELD] = total_size
         # TODO: we need to store self._processed_sample_metas as an in-class property to be able to consider it for eviction.
         # self._stored_sample_ids.append(sample_id)
         # self._disk_usage += total_size
-        return self._load_sample(sample_meta)
+        return next(self._construct_samples(sample_meta))
 
     def _schedule_download_(self, key: int | str, sample_meta: dict[str, Any], blocking: bool=False) -> Any:
-        source_urls: list[str] = [sample_meta[col] for col in self.columns_to_load]
-        destinations: list[str] = [os.path.join(self.dst, self.name, sample_meta[self.index_col_name] + os_utils.file_ext(sample_meta[col]).lower()) for col in self.columns_to_load]
+        source_urls: list[str] = [sample_meta[col] for col in self.columns_to_download]
+        destinations: list[str] = [os.path.join(self.dst, self.name, sample_meta[self.index_col_name] + os_utils.file_ext(sample_meta[col]).lower()) for col in self.columns_to_download]
         downloading_result = self.downloader.schedule_task(
             key=key,
             source_urls=source_urls,
@@ -132,7 +130,7 @@ class StreamingDataset(IterableDataset):
             blocking=blocking,
         )
         # Fill the sample_meta with the destination paths.
-        for col, dst in zip(self.columns_to_load, destinations):
+        for col, dst in zip(self.columns_to_download, destinations):
             sample_meta[col] = dst
         sample_meta[PROCESSED_FIELD] = True  # Mark the sample as processed.
 
@@ -147,30 +145,16 @@ class StreamingDataset(IterableDataset):
         logger.debug(f"Scheduled {len(processed_sample_metas)} samples for download with {self.downloader}.")
         return processed_sample_metas
 
-    def _load_sample(self, sample_meta: dict[str, Any]) -> dict[str, Any]:
+    def _construct_samples(self, sample_meta: dict[str, Any]) -> Iterator[SampleData]:
         # Loads all the binary files from the sample_meta.
         assert sample_meta[PROCESSED_FIELD], "Sample must be processed before loading."
-        sample_data = {}
-
-        # Loading the downloaded binary files into memory. TODO: we can move this into callbacks.
-        columns_to_yield = self.columns_to_yield if self.columns_to_yield is not None else list(sample_meta.keys())
-        for col in columns_to_yield:
-            if col in self.columns_to_load:
-                assert col in sample_meta, f"Column {col} not found in sample_meta."
-                with open(sample_meta[col], 'rb') as f:
-                    sample_data[col] = f.read()
-            else:
-                sample_data[col] = sample_meta[col]
+        sample = {k: v for k, v in sample_meta.items() if k != PROCESSED_FIELD} # Creating a shallow copy of the sample_meta.
 
         # Augmenting with special keys.
-        sample_data[self.index_col_name] = sample_meta[self.index_col_name]  # Add the index column.
-        sample_data[SAMPLE_KEY_FIELD] = sample_meta[self.index_col_name]  # Add a key for the sample.
+        sample[SAMPLE_KEY_FIELD] = sample_meta[self.index_col_name]  # Add a key for the sample.
 
-        # Apply the data processing callbacks.
-        for callback in self.data_processing_callbacks:
-            sample_data = callback(sample_data)
-
-        return sample_data
+        # Some transforms may return multiple samples, so we yield from them instead of returning a single sample.
+        yield from apply_transforms_recursively(sample, self.transforms)
 
     def _maybe_evict_cold_samples(self, processed_sample_metas: dict[str, Any]) -> bool:
         assert self._worker_cache_limit is not None, "Worker cache limit must be set before eviction."
@@ -192,7 +176,7 @@ class StreamingDataset(IterableDataset):
 
     def _delete_sample_from_disk(self, sample_meta: dict[str, Any]) -> None:
         assert sample_meta[PROCESSED_FIELD], "Sample must be processed before deletion."
-        for col in self.columns_to_load:
+        for col in self.columns_to_download:
             file_path = sample_meta[col]
             assert os.path.exists(file_path), f"File {file_path} does not exist."
             os.remove(file_path)
@@ -214,7 +198,7 @@ class StreamingDataset(IterableDataset):
         dl_worker_rank, dl_num_workers = dist_utils.get_safe_worker_info()
         self._maybe_init_worker_cache_limit(dl_worker_rank, dl_num_workers)
         if self.index is None:
-            self.index = load_index_slice(self.index_meta, dl_worker_rank, dl_num_workers)
+            self.index = load_index_slice(self.index_meta, dl_worker_rank, dl_num_workers, dist_utils.get_num_nodes())
         self.epoch += 1 # TODO: this would be incrementing the epoch each time a new dataloader is called over the dataset, which is not good.
 
         if self._crash_event is None:
@@ -234,14 +218,44 @@ class StreamingDataset(IterableDataset):
         processed_sample_metas: list[dict[str, Any]] = self._schedule_downloads(sample_ids)
 
         for sample_id, total_size in self.downloader.yield_completed_keys():
-            logger.debug(f"Processing sample {sample_id}...")
+            logger.debug(f"Processing sample {sample_id} with size {total_size} bytes.")
             processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD] = total_size
             self._stored_sample_ids.append(sample_id)
             self._disk_usage += total_size
-            yield self._load_sample(processed_sample_metas[sample_id])
+            yield from self._construct_samples(processed_sample_metas[sample_id])
             self._maybe_evict_cold_samples(processed_sample_metas)
             self._gc.maybe_collect()
         logger.debug(f"Yielded {self.num_yielded_samples} samples in epoch {self.epoch}.")
         self.downloader.wait_completion()
+
+#----------------------------------------------------------------------------
+
+def apply_transforms_recursively(sample: SampleData, transforms: list[SampleTransform]) -> Iterator[SampleData]:
+    """
+    Applies a list of transforms to a sample sequentially. A transform can return
+    a single sample or an iterator/generator of samples.
+    """
+    assert isinstance(sample, dict), f"Sample must be a dictionary, but got {type(sample)}."
+
+    # Base case: If there are no more transforms, yield the processed sample.
+    if not transforms:
+        yield sample
+        return
+
+    # Apply the current transform to the sample.
+    result = transforms[0](sample)
+
+    # The result might be a single new sample or a generator/iterator of new samples.
+    if isinstance(result, types.GeneratorType):
+        for processed_sample in result:
+            # For each sample yielded by the transform, apply the rest of the transforms.
+            yield from apply_transforms_recursively(processed_sample, transforms[1:])
+    # It might also be another iterable like a list, but not a dict (which is our sample type)
+    elif isinstance(result, (list, tuple)):
+        for processed_sample in result:
+             yield from apply_transforms_recursively(processed_sample, transforms[1:])
+    # Otherwise, it's a single sample.
+    else:
+        yield from apply_transforms_recursively(result, transforms[1:])
 
 #----------------------------------------------------------------------------

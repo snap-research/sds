@@ -1,5 +1,6 @@
-from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Callable, TypeAlias, Generator
+from dataclasses import dataclass
 from PIL import Image
 
 #---------------------------------------------------------------------------
@@ -56,5 +57,9 @@ EXT_TO_DATA_TYPE = {
     **dict.fromkeys(TEXT_EXT, 'text'),
     **dict.fromkeys(LATENT_EXT, 'latent'),
 }
+
+# Sample dict and sample transform type aliases.
+SampleData = dict[str, Any]
+SampleTransform: TypeAlias = Callable[[SampleData], SampleData | Generator[SampleData, None, None]]
 
 #---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] More test coverage
 - [ ] Documentation
 - [x] Support for data provides as callbacks (possibly via forward/backward translation)
-- [ ] There is no global shuffling right now, so smth like ImageNet training will be flawed.
+- [x] There is no global shuffling right now, so smth like ImageNet training will be flawed.
 - [ ] Evict samples inside random access queries as well.
 - [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
 - [ ] Fix TODOs in the codebase.
@@ -33,37 +33,42 @@ A streaming dataset lib which loads data in a streaming fashion:
 - [ ] State dict management.
 - [x] Can we construct a remote S3 index in parallel?
 - [x] Construct an index for a local/remote directory.
+- [ ] Sometimes, we can have less raw index files that nodes.
 
 # Installation
 
 ```bash
-pip install mosaicml-streaming beartype pytest torch torchvision torchaudio
+pip install beartype pytest torch torchvision torchaudio
 ```
 
 # Usage
-## Basic usage
+### Basic usage
 ```python
+
 from sds.dataset import StreamingDataset
+
 dataset = StreamingDataset(
     src='s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet',
     dst='ignore/tmp',
     data_type='image',
-    columns_to_load=['data_url'],
+    columns_to_download=['data_url'],
     index_col_name='data_id',
     num_downloading_workers=10,
 )
+
 sample = dataset[0] # Downloads (with blocking) the sample and returns it
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=3, shuffle=False)
+
 for batch in dataloader: # Loads samples in parallel.
     print(batch.keys())
 ```
 
-## Running a simple demo
+### Running a simple demo
 ```bash
-python scripts/unpack.py s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet ignore/tmp --columns_to_load data_url --index_col_name data_id --num_downloading_workers 10
+python scripts/unpack.py s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet ignore/tmp --columns_to_download data_url --index_col_name data_id --num_downloading_workers 10
 ```
 
-## Constructing an index
+### Constructing an index
 When training on files list directory (remote or local), it's recommended to precompute the index so that we don't need to scan the directory each time.
 You can use a command like this to do that:
 ```bash
@@ -71,9 +76,49 @@ python scripts/construct_index.py --src s3://snap-genvid/datasets/tmp/ --dst s3:
 ```
 After the index is constructed, you can simply replace your `src` argument with the index file path, e.g. `s3://snap-genvid/datasets/tmp-index.csv`.
 
+# How it works
+The entry point is the `StreamingDataset` class, which takes a source `src` and arguments and does the following:
+1. It constructs an index from the source:
+    - if `src` is a local or remote CSV/parquet/json file, it reads the index from there.
+    - if `src` is a local or remote directory, it scans the directory and constructs an index from the files.
+    - if `src` is a local or remote index wildcard (e.g., `/path/to/*.csv`), it scans the files matching the wildcard and constructs an index from them.
+2. Then, we save the index on the node as a parquet file (for memory efficient chunked reading) and return an index metadata object.
+3. After that, the dataset init initializes an "empty" downloader (without initializing the downloader workers). Without workers, the downloader can be used for random access queries, such as `dataset[0]`, which will download the sample with blocking.
+3. When the iterator is created, we initialize the downloader workers, which will download samples in parallel and cache them on disk.
+4. Then, each dataloading worker reads its index chunk, shuffles it and starts the generator, which yields samples one by one.
+5. The downloader yields the indicies of the downloaded samples. Then, we look up the sample metadata by its index and process it through a sequence of sample processing callbacks (named transforms).
+6. Sample transforms are very flexible and you can incorporate any processing logic you want, such as decoding images/videos/audios, applying augmentations, etc.
+7. The are "presets" of sample transforms which should cover 80% of the cases for image/video/text-to-video/etc use cases.
+8. Caching and eviction logic is performed by the StreamingDataset class, which keeps track of downloaded file sizes and evicts the oldest ones when the cache size exceeds the threshold. Currently, the cache size is set naively per workers as `node_cache_size / num_workers`, assuming that each worker has equal load.
 
 # Development
-## Running tests
+### Running tests
 ```bash
 PYTHONPATH=. pytest tests
 ```
+
+### Contributing
+Create your own branch, make changes, and create a pull request.
+
+Style guide:
+- Use rebase instead of merges where possible.
+- 4 spaces for indentation
+- Always annotate shapes of tensors via inline comments (even in the obvious cases), e.g.:
+```python
+x = torch.randn(3, 4, 5) # [batch_size, sequence_length, hidden_size]
+```
+- Always annotate the type of the function arguments and return values.
+- We use something similar to [AngularJS commit styleguide](https://gist.github.com/brianclements/841ea7bffdb01346392c): a commit should be of the form `<type>(<scope>): <subject>`, where `<type>` is one of the following:
+  - `feat`: a new feature
+  - `fix`: a bug fix
+  - `docs`: changes to documentation
+  - `style`: formatting, missing semi colons, etc; no code change
+  - `refactor`: refactoring production code
+  - `test`: adding tests, refactoring test; no production code change
+  - `chore`: updating build tasks, package manager configs, etc; no production code change
+  - `revert`: reverting to a previous commit
+  - `perf`: a code change that improves performance
+  - `ci`: changes to CI configuration files and scripts
+  - `build`: changes that affect the build system or external dependencies
+  - `temp`: temporary commit that won't be included in the final version
+  - `wip`: work in progress

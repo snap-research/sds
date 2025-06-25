@@ -1,0 +1,213 @@
+"""
+A set of presets for image/video/audio decoding and processing.
+"""
+import io
+import pickle
+from typing import Union, Any
+from collections.abc import Callable
+
+from beartype import beartype
+import numpy as np
+from numpy.typing import NDArray
+from PIL import Image
+import torch
+import torchvision.transforms.functional as TVF
+
+from sds.transforms.video_decoder import VideoDecoder
+
+#----------------------------------------------------------------------------
+# Image/video processing functions.
+
+@beartype
+def resize_image(image: Image.Image | torch.Tensor, **resize_kwargs) -> Image.Image | torch.Tensor:
+    return lean_resize_frames([image], **resize_kwargs)[0]
+
+@beartype
+def lean_resize_frames(
+        frames: list[Image.Image] | list[torch.Tensor] | torch.Tensor,
+        resolution: tuple[int, int],
+        crop_before_resize: bool=True,
+        allow_vertical: bool=False,
+        random_resize: dict[str, float] | None=None,
+        interpolation_mode=TVF.InterpolationMode.LANCZOS,
+    ) -> list[Image.Image] | list[torch.Tensor]:
+    """
+    Resizes each frame in the batch to the specified resolution.
+    Possibly inverts it if it's vertical and allowed to do so.
+    Also, can randomly downsample the frames given the `random_resize` dict of the form {(h,w): probability}.
+    Args:
+        - frames: List of frames to resize, either as PIL Images or torch Tensors.
+        - resolution: Target resolution as a tuple (width, height).
+        - crop_before_resize: If True, crops the frames to the target aspect ratio before resizing.
+        - allow_vertical: If True, allows the frames to be resized to a vertical resolution via flipping input `resolution` as (width, height).
+        - random_resize: A dictionary mapping resolutions to their probabilities for random downsampling.
+        - interpolation_mode: Interpolation mode to use for resizing.
+    Returns:
+        - List of resized frames.
+    """
+    assert len(resolution) == 2, f"Wrong resolution: {resolution}"
+    w, h = frames[0].size if isinstance(frames[0], Image.Image) else (frames[0].shape[2], frames[0].shape[1]) # [h, w]
+    is_originally_vertical = h > w
+
+    if random_resize is not None:
+        assert sum(random_resize.values()) == 1.0, f"Probabilities should sum to 1.0: {random_resize}"
+        random_resize = {k: v for k, v in random_resize.items() if k[0] <= w and k[1] <= h} # Only keep resolutions that are smaller than the original one.
+        if len(random_resize) > 0:
+            resolutions, probs = zip(*random_resize.items()) # [num_resolutions], [num_resolutions]
+            resolution = resolutions[np.random.choice(len(resolutions), p=np.array(probs) / sum(probs))] # [2]
+
+    h_trg, w_trg = (max(resolution), min(resolution)) if is_originally_vertical and allow_vertical else resolution
+
+    if w == w_trg and h == h_trg:
+        # TVF.resize has a similar shortcut, but here we won't even iterate.
+        return frames
+
+    if crop_before_resize:
+        frames = [crop_to_aspect_ratio(x, target_aspect_ratio=w_trg / h_trg) for x in frames]
+    frames = [TVF.resize(x, size=(h_trg, w_trg), interpolation=interpolation_mode) for x in frames]
+
+    return frames
+
+@beartype
+def reshape_image_as_single_frame_video(image: torch.Tensor) -> torch.Tensor:
+    # Returns a [c, h, w] image as [1, c, h, w] video.
+    assert len(image.shape) == 3, f"Wrong shape: {image.shape}."
+    assert image.shape[0] in (1, 3, 4), f"Wrong shape: {image.shape}."
+    return image.unsqueeze(0) # [1, c, h, w]
+
+@beartype
+def load_image_from_bytes(image_bytes: bytes) -> Image.Image:
+    """
+    Loads an image from bytes and returns it as a PIL Image.
+    TODO: we lose RGBA channels here, so maybe we should handle grayscale/RGB vs RGBA cases separately.
+    """
+    return Image.open(io.BytesIO(image_bytes)).convert('RGB') # Ensure the image is in RGB format
+
+@beartype
+def convert_pil_image_to_byte_tensor(image: Image.Image) -> torch.Tensor:
+    return torch.from_numpy(np.array(image)).permute(2, 0, 1)
+
+@beartype
+def load_image_tensor_from_bytes(image_bytes: bytes) -> torch.Tensor:
+    image = load_image_from_bytes(image_bytes)
+    image_pt = convert_pil_image_to_byte_tensor(image)
+    return image_pt
+
+@beartype
+def crop_to_aspect_ratio(image: Image.Image | torch.Tensor, target_aspect_ratio: float) -> Image.Image | torch.Tensor:
+    """Crops the image to the specified aspect ratio."""
+    if isinstance(image, Image.Image):
+        cur_w, cur_h = image.size
+    elif isinstance(image, torch.Tensor):
+        assert image.shape[0] in (1, 3, 4), f"Unsupported number of channels in shape {image.shape}. Must be 1, 3, or 4."
+        _c, cur_h, cur_w = image.shape
+    else:
+        raise TypeError(f"Unsupported type: {type(image)}. Must be PIL.Image or torch.Tensor.")
+
+    cur_aspect_ratio = cur_w / cur_h
+
+    if cur_aspect_ratio > target_aspect_ratio:
+        # Too wide: crop width
+        new_width = int(cur_h * target_aspect_ratio)
+        offset_left = (cur_w - new_width) // 2
+        return _apply_crop(image, (offset_left, 0, offset_left + new_width, cur_h))
+    else:
+        # Too tall: crop height
+        new_height = int(cur_w / target_aspect_ratio)
+        offset_top = (cur_h - new_height) // 2
+        return _apply_crop(image, (0, offset_top, cur_w, offset_top + new_height))
+
+@beartype
+def _apply_crop(x: Image.Image | torch.Tensor, crop: tuple[int, int, int, int]) -> Image.Image | torch.Tensor:
+    if isinstance(x, Image.Image):
+        return x.crop(crop)
+    elif isinstance(x, torch.Tensor):
+        return x[:, crop[1]:crop[3], crop[0]:crop[2]]
+
+@beartype
+def decode_frames_from_video(
+        num_frames_total: int,
+        num_frames_to_extract: int,
+        video_file: bytes | str | None=None,
+        video_decoder: VideoDecoder | None=None,
+        random_offset: bool=True,
+        frame_seek_timeout_sec: float=5.0,
+        allow_shorter_videos: bool=False,
+        frames_idx: NDArray | None =None,
+    ) -> NDArray:
+    """
+    Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
+    """
+    if frames_idx is None:
+        num_frames_to_extract = min(num_frames_total, num_frames_to_extract) if allow_shorter_videos else num_frames_to_extract
+        assert num_frames_total >= num_frames_to_extract, f"Video has only {num_frames_total} frames, but we need at least {num_frames_to_extract} frames."
+        start_frame_idx = np.random.randint(low=0, high=num_frames_to_extract + 1) if random_offset else 0
+        frames_idx = np.arange(start_frame_idx, start_frame_idx + num_frames_to_extract) # [num_frames]
+    if video_decoder is None:
+        assert video_file is not None, "Video bytes must be provided if no video decoder is specified."
+        video_decoder = VideoDecoder(file=video_file)
+    frames = video_decoder.decode_frames_at_indexes(frames_idx, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)
+
+    return frames
+
+
+#----------------------------------------------------------------------------
+# Miscellaneous transforms.
+
+@beartype
+def convert_pickle_embeddings_to_numpy(embeddings_raw_str, label_shape: tuple[int]) -> NDArray:
+    """
+    Converts raw pickle embeddings into a numpy matrix (with paddings).
+    TODO: dtype is either string or bytes.
+    """
+    embeddings_data = pickle.loads(embeddings_raw_str)
+    embeddings = embeddings_data['embeddings'] # [num_text_tokens, d]
+    embeddings[embeddings_data['eot_location'] + 1:] = 0.0
+    embeddings = embeddings[:label_shape[0]] # [num_text_tokens, d]
+    embeddings = np.concatenate([embeddings, np.zeros((label_shape[0] - embeddings.shape[0], embeddings.shape[1]))], axis=0).astype(np.float32) # [num_text_tokens, d]
+
+    return embeddings
+
+@beartype
+def none_to_empty_str(data: dict[str, Union[str, None]]) -> dict[str, Any]:
+    return {k: (v if v is not None else '') for k, v in data.items()}
+
+def rename_fields(sample_data: dict[str, str], old_to_new_mapping: dict[str, str]) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    pass
+
+def one_hot_encode(label: int, num_classes: int) -> NDArray:
+    """Converts a label to a one-hot encoded vector."""
+    assert 0 <= label < num_classes, f"Label {label} is out of bounds for {num_classes} classes."
+    one_hot = np.zeros(num_classes, dtype=np.float32)
+    one_hot[label] = 1.0
+    return one_hot
+
+#----------------------------------------------------------------------------
+# Processing functions for the streaming dataset.
+
+def construct_frame_resize_callback(
+        resolution: tuple[int, int],
+        crop_before_resize: bool=True,
+        allow_vertical: bool=False,
+        random_resize: dict[str, float]=None,
+        interpolation_mode=TVF.InterpolationMode.LANCZOS,
+    ) -> Callable[[list[Union[Image.Image, torch.Tensor]]], list[Image.Image]]:
+    """
+    Constructs a function to resize frames to the specified resolution.
+    """
+    return lambda frames: lean_resize_frames(
+        frames=frames,
+        resolution=resolution,
+        crop_before_resize=crop_before_resize,
+        allow_vertical=allow_vertical,
+        random_resize=random_resize,
+        interpolation_mode=interpolation_mode,
+    )
+
+#----------------------------------------------------------------------------
+# A video processing preset for joint audio/video decoding.
+
+def construct_joint_video_audio_decoding_callback():
+    pass
+
+#----------------------------------------------------------------------------

@@ -65,6 +65,8 @@ class ParallelDownloader:
         if blocking:
             return run_downloading_task(downloading_task)
         else:
+            if self.thread_pool is None:
+                self.init_thread_pool()
             self.thread_pool.schedule_task(
                 run_downloading_task,
                 task_input=downloading_task,
@@ -114,10 +116,12 @@ def run_downloading_task(task: DownloadingTask) -> float:
     total_size = 0
     for url, dst in zip(task.source_urls, task.destinations):
         prefix = urllib.parse.urlparse(url).scheme
-        if task.skip_if_exists and os.path.exists(dst) and os.path.getsize(dst) > 0:
+        cur_dst_size = os.path.getsize(dst) if os.path.exists(dst) else 0
+        if task.skip_if_exists and cur_dst_size > 0:
+            total_size += cur_dst_size
             continue
         task.downloaders[prefix].download(url, dst, timeout=task.timeout)
-        total_size += os.path.getsize(dst) if os.path.exists(dst) else 0
+        total_size += os.path.getsize(dst)
     return total_size
 
 #----------------------------------------------------------------------------

@@ -5,6 +5,8 @@ import time
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 
+from beartype import beartype
+from loguru import logger
 import boto3
 from tqdm import tqdm
 from sds.utils.download import CloudDownloader
@@ -75,7 +77,7 @@ def parallel_download(srcs: list[str], dsts: list[str], skip_if_exists: bool = T
         jobs = tqdm(jobs, total=len(srcs), desc="Downloading files") if verbose else jobs
         _results = list(jobs)
 
-
+@beartype
 def download_file(src: str, dst: str, skip_if_exists: bool, ignore_exceptions: bool = False):
     """
     Wrapper for a single download/copy task. It checks if the file
@@ -90,15 +92,35 @@ def download_file(src: str, dst: str, skip_if_exists: bool, ignore_exceptions: b
         CloudDownloader.get(src).direct_download(remote=src, local=dst)
         return True  # Downloaded/Copied
     except Exception as e:
-        print(f"Error processing {src} -> {dst}: {e}")
+        logger.debug(f"Error processing {src} -> {dst}: {e}")
         if ignore_exceptions:
-            raise
-        else:
             return False
+        else:
+            raise
 
 def is_non_empty_file(path: os.PathLike) -> bool:
     path = os.fspath(path)
     return os.path.isfile(path) and os.path.getsize(path) > 0
+
+#---------------------------------------------------------------------------
+# Uploading utils.
+
+def upload_file(src: str, dst: str):
+    if dst.startswith("s3://"):
+        # Upload to S3
+        parsed = urlparse(dst)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip('/')
+        s3 = boto3.client("s3")
+        s3.upload_file(src, bucket, key)
+    elif dst.startswith("/"):
+        # Local copy
+        dst_dir = os.path.dirname(dst)
+        if not os.path.exists(dst_dir):
+            os.makedirs(dst_dir)
+        os.replace(src, dst)
+    else:
+        raise ValueError(f"Unsupported destination path: {dst}. Must be a local path or S3 URI.")
 
 #---------------------------------------------------------------------------
 # S3 utils.

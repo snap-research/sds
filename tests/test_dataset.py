@@ -142,7 +142,7 @@ def test_getitem(mock_env, dataset_class):
         src=mock_env["mock_src"],
         dst=mock_env["temp_dir"],
         data_type='directory',
-        columns_to_load=['image.jpg'],
+        columns_to_download=['image.jpg'],
         index_col_name='index'
     )
     dataset.downloader = MockParallelDownloader()
@@ -169,7 +169,7 @@ def test_iteration_flow(mock_env, dataset_class):
         src=mock_env["mock_src"],
         dst=mock_env["temp_dir"],
         data_type='directory',
-        columns_to_load=['image.jpg', 'label.txt'],
+        columns_to_download=['image.jpg', 'label.txt'],
         index_col_name='index'
     )
 
@@ -214,7 +214,7 @@ def test_data_processing_callback(mock_env, dataset_class):
         src=mock_env["mock_src"],
         dst=mock_env["temp_dir"],
         data_type='directory',
-        columns_to_load=['image.jpg'],
+        columns_to_download=['image.jpg'],
         data_processing_callbacks=[mock_callback]
     )
     dataset.downloader = MockParallelDownloader()

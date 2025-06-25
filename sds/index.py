@@ -66,11 +66,11 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, shuffle_seed:
     if src.endswith('/split_file_paths.txt') or src.endswith(f'*{src_ext}'):
         return build_index_from_many_index_files(src, dst_dir, shuffle_seed)
     elif any(src.endswith(ext) for ext in ['.csv', '.json', '.parquet']): # TODO: process parquet data more intelligently via slicing.
-        return build_index_from_index_file(src, dst_dir)
+        return build_index_from_index_file(src, dst_dir, shuffle_seed=shuffle_seed)
     else:
         files_list = os_utils.find_files_in_src(src)
         assert files_list, f"No files found in the source {src} for data type {data_type}."
-        return build_index_from_files_list(files_list, data_type=data_type, dst_dir=dst_dir)
+        return build_index_from_files_list(files_list, data_type=data_type, dst_dir=dst_dir, shuffle_seed=shuffle_seed)
 
 
 def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int) -> IndexMetaData:
@@ -87,17 +87,19 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int)
         with dist_utils.leader_first(local=True, skip_non_leaders=True):
             CloudDownloader.get(src).direct_download(remote=src, local=os.path.join(dst_dir, RAW_INDEX_FILES_DIR, 'split_file_paths.txt'))
         with open(dst, 'r') as f:
-            files_list = [line.strip() for line in f if line.strip()]
+            index_files_list = [line.strip() for line in f if line.strip()]
     else:
         # Index files are passed as a wildcard path (e.g., 's3://bucket/path/*.csv'). Let's find them all.
-        files_list = os_utils.find_files_in_src(src.replace(f'*{src_ext}', ''), exts={src_ext}) # Remove the wildcard from the src path.
+        index_files_list = os_utils.find_files_in_src(src.replace(f'*{src_ext}', ''), exts={src_ext}) # Remove the wildcard from the src path.
+
 
     # Once we have the list of files, we need to distribute them across nodes.
     # We distribute the data across nodes on a per-file basis instead of per-sample basis. This mainly affects shuffling.
     node_rank = dist_utils.get_node_rank()
-    num_files_per_node = len(files_list) // dist_utils.get_num_nodes()
-    np.random.RandomState(shuffle_seed).shuffle(files_list)  # Shuffle the files list for randomness.
-    cur_node_files_list = files_list[node_rank * num_files_per_node:(node_rank + 1) * num_files_per_node]
+    num_files_per_node = len(index_files_list) // dist_utils.get_num_nodes()
+    assert num_files_per_node > 0, f"Not enough files to distribute across nodes. Found {len(index_files_list)} files, but expected at least {dist_utils.get_num_nodes()} files per node."
+    np.random.RandomState(shuffle_seed).shuffle(index_files_list)  # Shuffle the files list for randomness.
+    cur_node_files_list = index_files_list[node_rank * num_files_per_node:(node_rank + 1) * num_files_per_node]
 
     # Now, we need to download them in parallel and save as a unified parquet file.
     dst_files_list = [os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(f)) for f in cur_node_files_list]
@@ -107,6 +109,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int)
     # downloaded_filesfiles = glob.glob(os.path.join(dst_dir, RAW_INDEX_FILES_DIR, f'*{src_ext}'))
     reader = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': lambda *args, **kwargs: pq.read_table(*args, **kwargs).to_pandas()}[src_ext]
     df = pd.concat((reader(f) for f in dst_files_list), ignore_index=True)
+    df = maybe_shuffle_df(df, shuffle_seed)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     df.to_parquet(index_dst, index=False)
     index_meta = IndexMetaData(len(df), index_dst, IndexType.INTRA_NODE)  # Placeholder for the actual number of samples.
@@ -114,7 +117,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int)
     return index_meta
 
 
-def build_index_from_index_file(src: str, dst_dir: str) -> IndexMetaData:
+def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None) -> IndexMetaData:
     # We have just a single index file which contains all the data samples metadata.
     # First, download the file to the destination directory.
     dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(src))
@@ -127,6 +130,7 @@ def build_index_from_index_file(src: str, dst_dir: str) -> IndexMetaData:
     df = reader(dst)
     if isinstance(df, pa.Table):
         df = df.to_pandas()
+    df = maybe_shuffle_df(df, shuffle_seed)
     assert isinstance(df, pd.DataFrame), f"Expected a DataFrame, got {type(df)} from {src}."
 
     # Now, we can save it as a parquet file for easier slicing.
@@ -136,10 +140,10 @@ def build_index_from_index_file(src: str, dst_dir: str) -> IndexMetaData:
     return IndexMetaData(len(df), index_dst, IndexType.INTER_NODE)
 
 
-def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType) -> IndexMetaData:
+def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType, shuffle_seed: int=None) -> IndexMetaData:
     main_files = [f for f in files_list if os_utils.file_ext(f).lower() in DATA_TYPE_TO_EXT[data_type]]
     assert len(main_files) > 0, f"Didnt find any {data_type} files (used extensions: {DATA_TYPE_TO_EXT[data_type]})."
-    main_file_keys = set([os_utils.file_key(f) for f in main_files])
+    main_file_keys = list(set([os_utils.file_key(f) for f in main_files]))
     assert len(main_file_keys) > 0, f"Didnt find any {data_type} files (used extensions: {DATA_TYPE_TO_EXT[data_type]})."
 
     # Now, once we have the main files, we can build the columns.
@@ -157,7 +161,8 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
 
     # Convert the dict to a DataFrame
     INDEX_COL_NAME = 'index'
-    df = pd.DataFrame.from_dict(data, orient='index').reset_index(names=INDEX_COL_NAME)
+    df = pd.DataFrame.from_dict(data, orient='index').reset_index(names=INDEX_COL_NAME).sort_values(by=INDEX_COL_NAME)
+    df = maybe_shuffle_df(df, shuffle_seed)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     data_utils.save_polars_parquet(df, index_dst)
     index_meta = IndexMetaData(len(df), index_dst, IndexType.INTER_NODE)
@@ -167,12 +172,11 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
 #---------------------------------------------------------------------------
 # Loading functions for an already created index.
 
-def load_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int) -> pd.DataFrame:
+def load_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int) -> pd.DataFrame:
     assert index_meta.path.endswith('.parquet'), f"Index file must be a parquet file. Found: {index_meta.path}"
-    num_samples_per_rank = index_meta.num_samples // num_ranks
-    start_idx = rank * num_samples_per_rank
-    rank_df = pl.scan_parquet(index_meta.path).slice(offset=start_idx, length=num_samples_per_rank).collect().to_pandas()
-    return rank_df
+    start_idx, num_samples_per_rank = compute_index_slice(index_meta, rank, num_ranks, num_nodes)
+    return pl.scan_parquet(index_meta.path).slice(offset=start_idx, length=num_samples_per_rank).collect().to_pandas()
+
 
 def load_index_row(index_meta: IndexMetaData, idx: int) -> pd.DataFrame:
     """
@@ -181,5 +185,32 @@ def load_index_row(index_meta: IndexMetaData, idx: int) -> pd.DataFrame:
     assert index_meta.path.endswith('.parquet'), f"Index file must be a parquet file. Found: {index_meta.path}"
     row_df = pl.scan_parquet(index_meta.path).slice(offset=idx, length=1).collect().to_pandas()
     return row_df
+
+def compute_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int) -> tuple[int, int]:
+    if index_meta.index_type == IndexType.INTRA_NODE:
+        # Each node has its own slicing.
+        num_ranks_per_node = num_ranks // num_nodes
+        num_samples_per_rank = index_meta.num_samples // num_ranks_per_node
+        local_rank = rank % num_ranks_per_node
+        start_idx = local_rank * num_samples_per_rank
+    elif index_meta.index_type == IndexType.INTER_NODE:
+        num_samples_per_rank = index_meta.num_samples // num_ranks
+        start_idx = rank * num_samples_per_rank
+    else:
+        raise ValueError(f"Unknown index type: {index_meta}")
+
+    return start_idx, num_samples_per_rank
+
+#---------------------------------------------------------------------------
+# Miscellaneous transforms.
+
+def maybe_shuffle_df(df: pd.DataFrame, shuffle_seed: int | None) -> pd.DataFrame:
+    """
+    Shuffle the DataFrame if a shuffle seed is provided.
+    """
+    if shuffle_seed is not None:
+        # TODO: we need a more memory-efficient way to shuffle the DataFrame.
+        df = df.sample(frac=1, replace=False, random_state=shuffle_seed)
+    return df
 
 #---------------------------------------------------------------------------

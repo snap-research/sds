@@ -10,14 +10,16 @@ from sds.index import build_index, load_index_slice
 from sds.structs import DataSampleType
 from sds.utils import os_utils
 
+#---------------------------------------------------------------------------
 
 def construct_index(src: str, dst: str, tmp_dir: str, data_type: str):
     index_meta = build_index(src=src, dst_dir=tmp_dir, data_type=DataSampleType.from_str(data_type), shuffle_seed=None)
-    index = load_index_slice(index_meta, rank=0, num_ranks=1)
+    index = load_index_slice(index_meta, rank=0, num_ranks=1, num_nodes=1)
     tmp_index_path = os.path.join(tmp_dir, 'index.csv')
     index.to_csv(tmp_index_path, index=False)
     os_utils.upload_file(tmp_index_path, dst)
 
+#---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Construct an index for local/remote files directory.")
@@ -34,3 +36,5 @@ if __name__ == "__main__":
         tmp_dir=args.tmp_dir,
         data_type=args.data_type,
     )
+
+#---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 from sds.index import (
     DataSampleType,
     IndexMetaData,
-    INDEX_TYPE,
+    IndexType,
     RAW_INDEX_FILES_DIR,
     INDEX_FILE_NAME,
     build_index_from_files_list,
@@ -32,19 +32,6 @@ class MockDistUtils:
     def get_num_nodes(self):
         return 1
 
-class MockOsUtils:
-    def find_files_in_src(self, src, exts):
-        return [os.path.join(src, f) for f in os.listdir(src) if any(f.endswith(ext) for ext in exts)]
-
-    def download_file(self, src, dst, skip_if_exists):
-        # In a real test, you might want to copy a dummy file
-        with open(dst, 'w') as f:
-            f.write("dummy content")
-
-    def parallel_download(self, srcs, dsts, skip_if_exists, num_workers):
-        for src, dst in zip(srcs, dsts):
-            self.download_file(src, dst, skip_if_exists)
-
 class MockDataUtils:
     def save_polars_parquet(self, df, path):
         df.to_parquet(path)
@@ -53,7 +40,6 @@ class MockDataUtils:
 # For this example, I'll assume the classes and functions are available in the global scope.
 # To make the original code runnable, we need to define the mocked modules
 dist_utils = MockDistUtils()
-os_utils = MockOsUtils()
 data_utils = MockDataUtils()
 # Let's also create dummy versions of the other missing modules for the sake of making the code executable
 class MockCloudDownloader:
@@ -104,8 +90,7 @@ class TestFileFunctions(unittest.TestCase):
         with self.assertRaises(KeyError):
             DataSampleType.from_str('UNKNOWN')
 
-    @patch('sds.utils.os_utils.find_files_in_src')
-    def test_build_index_from_files_list(self, mock_find_files):
+    def test_build_index_from_files_list(self):
         """Test building an index from a list of files."""
         # Create dummy files
         dummy_files = ['img1.jpg', 'img1.txt', 'img2.png', 'img2.txt']
@@ -114,13 +99,12 @@ class TestFileFunctions(unittest.TestCase):
             with open(f_path, 'w') as f:
                 f.write("dummy")
 
-        mock_find_files.return_value = file_paths
         index_meta = build_index_from_files_list(file_paths, self.dst_dir, DataSampleType.IMAGE)
 
         # Assertions
         self.assertIsInstance(index_meta, IndexMetaData)
         self.assertEqual(index_meta.num_samples, 2)
-        self.assertEqual(index_meta.index_type, INDEX_TYPE.INTER_NODE)
+        self.assertEqual(index_meta.index_type, IndexType.INTER_NODE)
 
         # Check the created parquet file
         output_parquet = os.path.join(self.dst_dir, INDEX_FILE_NAME)
@@ -129,30 +113,22 @@ class TestFileFunctions(unittest.TestCase):
         df = pd.read_parquet(output_parquet)
         self.assertEqual(len(df), 2)
         self.assertIn('index', df.columns)
-        self.assertIn('.jpg', df.columns)
-        self.assertIn('.txt', df.columns)
+        self.assertIn('jpg', df.columns)
+        self.assertIn('txt', df.columns)
         self.assertIn('img1', df['index'].values)
 
-    @patch('sds.utils.os_utils.download_file')
-    def test_build_index_from_index_file(self, mock_download):
+    def test_build_index_from_index_file(self):
         """Test building an index from a single CSV index file."""
         # Create a dummy csv file
         src_csv_path = os.path.join(self.dst_dir, 'test_index.csv')
         dummy_df = pd.DataFrame({'image_path': ['/path/to/img1.jpg', '/path/to/img2.jpg']})
         dummy_df.to_csv(src_csv_path, index=False)
 
-        def mock_download_side_effect(src, dst, skip_if_exists):
-            # Simulate the download by copying the local dummy file
-            import shutil
-            shutil.copy(src, dst)
-
-        mock_download.side_effect = mock_download_side_effect
-
         index_meta = build_index_from_index_file(src_csv_path, self.dst_dir)
 
         # Assertions
         self.assertEqual(index_meta.num_samples, 2)
-        self.assertEqual(index_meta.index_type, INDEX_TYPE.INTER_NODE)
+        self.assertEqual(index_meta.index_type, IndexType.INTER_NODE)
 
         output_parquet = os.path.join(self.dst_dir, INDEX_FILE_NAME)
         self.assertTrue(os.path.exists(output_parquet))
@@ -168,7 +144,7 @@ class TestFileFunctions(unittest.TestCase):
         dummy_df = pd.DataFrame({'data': range(num_samples)})
         index_path = os.path.join(self.dst_dir, 'full_index.parquet')
         dummy_df.to_parquet(index_path)
-        index_meta = IndexMetaData(num_samples=num_samples, path=index_path, index_type=INDEX_TYPE.INTER_NODE)
+        index_meta = IndexMetaData(num_samples=num_samples, path=index_path, index_type=IndexType.INTER_NODE)
 
         num_ranks = 4
 
@@ -196,17 +172,17 @@ class TestFileFunctions(unittest.TestCase):
             mock_scan.side_effect = scan_side_effect
 
             # Rank 0
-            rank_0_df = load_index_slice(index_meta, rank=0, num_ranks=num_ranks)
+            rank_0_df = load_index_slice(index_meta, rank=0, num_ranks=num_ranks, num_nodes=1)
             self.assertEqual(len(rank_0_df), 25)
             self.assertEqual(rank_0_df['data'].iloc[0], 0)
 
             # Rank 2
-            rank_2_df = load_index_slice(index_meta, rank=2, num_ranks=num_ranks)
+            rank_2_df = load_index_slice(index_meta, rank=2, num_ranks=num_ranks, num_nodes=1)
             self.assertEqual(len(rank_2_df), 25)
             self.assertEqual(rank_2_df['data'].iloc[0], 50)
 
             # Last rank
-            rank_3_df = load_index_slice(index_meta, rank=3, num_ranks=num_ranks)
+            rank_3_df = load_index_slice(index_meta, rank=3, num_ranks=num_ranks, num_nodes=1)
             self.assertEqual(len(rank_3_df), 25)
             self.assertEqual(rank_3_df['data'].iloc[0], 75)
 
@@ -232,7 +208,6 @@ if __name__ == '__main__':
         'sds': MagicMock(),
         'sds.utils': MagicMock(),
         'sds.utils.distributed': dist_utils,
-        'sds.utils.os_utils': os_utils,
         'sds.utils.data_utils': data_utils,
     }):
         unittest.main(argv=['first-arg-is-ignored'], exit=False)
