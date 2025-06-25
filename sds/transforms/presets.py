@@ -263,6 +263,7 @@ def create_standard_metadata_pipeline(
     class_label_metadata_field: str | None = None,
     one_hot_encode_to_size: int | None = None,
     return_raw_metadata: bool = True,
+    class_label_target_field: str = 'class_label'
 ) -> list[SampleTransform]:
     """Creates a standard metadata processing pipeline by composing transform classes."""
     transforms: list[SampleTransform] = [
@@ -271,9 +272,9 @@ def create_standard_metadata_pipeline(
         RenameFieldsTransform(old_to_new_mapping={metadata_field: 'meta'}),
     ]
     if class_label_metadata_field is not None:
-        transforms.append(ExtractMetadataSubfieldTransform(class_label_metadata_field, 'class_label'))
+        transforms.append(ExtractMetadataSubfieldTransform(class_label_metadata_field, class_label_target_field))
         if one_hot_encode_to_size is not None:
-            transforms.append(OneHotEncodeTransform(input_field='class_label', num_classes=one_hot_encode_to_size))
+            transforms.append(OneHotEncodeTransform(input_field=class_label_target_field, num_classes=one_hot_encode_to_size))
     else:
         assert one_hot_encode_to_size is None, f"one_hot_encode_to_size={one_hot_encode_to_size} is only applicable when class_label_metadata_field is provided."
 
