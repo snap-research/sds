@@ -1,6 +1,8 @@
 import os
 import time
 import types
+import hashlib
+import base64
 from typing import Any, Iterator
 from collections import deque
 from collections.abc import Callable
@@ -33,6 +35,7 @@ class StreamingDataset(IterableDataset):
         data_type: DataSampleType | str, # The type of the dataset, e.g. 'csv', 'json', 'parquet', or 'directory'
         # local_shm_path: str, # A local file system path which only the workers of the current node can access.
         # global_shm_path: str, # A global file system path which any rank can access globally.
+        name: str | None=None, # A name for the dataset, used to identify it in the logs and metrics.
         shuffle_seed: int | None=None, # Shuffle seed for the dataset.
         transforms: list[Callable]=None, # A list of data augmentation callbacks to apply to the samples.
         columns_to_download: list[str] | None=None, # The names of the columns to use from the index file.
@@ -42,8 +45,11 @@ class StreamingDataset(IterableDataset):
         num_downloading_retries: int=3, # The number of retries to download a sample if it fails.
         none_to_empty_str: bool=True, # If True, convert None column values to empty strings in the samples.
         cache_limit: str | None='100mb', # The limit of the cache size in bytes. If None, no limit is applied.
+        max_size: int | None=None, # Cuts the amount of samples to this size, if specified. Useful for debugging or testing.
+        resolution: Any=None, # TODO: dirty hack to support the genvid repo...
     ):
-        self.name: str = os_utils.file_key(src)
+        _ = resolution # Unused, kept for compatibility with the genvid repo.
+        self.name: str = name if name is not None else os_utils.file_key(src)
         self.src: str = src
         self.dst: str = dst
         self.data_type: DataSampleType = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
@@ -55,6 +61,7 @@ class StreamingDataset(IterableDataset):
         self.num_downloading_retries = num_downloading_retries
         self.none_to_empty_str = none_to_empty_str
         self.index_col_name = index_col_name
+        self._max_size = max_size
         self._node_cache_limit = os_utils.bytes_to_int(cache_limit)
         self._worker_cache_limit = None
         self._disk_usage = 0 # Current cache usage in bytes.
@@ -73,7 +80,6 @@ class StreamingDataset(IterableDataset):
         self.index_slice = None # Index will be initialized in __iter__(), when we know the workers.
 
         self._executor: ThreadPoolExecutor | None = None # A background thread to do call downloading/deletion to not block the main thread.
-        self._crash_event: Event | None = None  # An event to signal if the background thread has crashed.
 
         # A downloader to download the shards in parallel.
         self.downloader = ParallelDownloader(
@@ -86,7 +92,10 @@ class StreamingDataset(IterableDataset):
     def build_index(self):
         now = time.time()
         logger.debug('Building index...')
-        self.index_meta = build_index(self.src, self.dst, self.data_type, self.shuffle_seed) if dist_utils.is_node_leader() else None
+        if dist_utils.is_node_leader():
+            self.index_meta = build_index(self.src, self.dst, self.data_type, shuffle_seed=self.shuffle_seed, max_size=self._max_size)
+        else:
+            self.index_meta = None
         dist_utils.maybe_barrier()
         self.index_meta = dist_utils.broadcast_object_locally(self.index_meta)
         logger.debug(f'Constructed an index: {self.index_meta}. Took {time.time() - now:.2f} seconds.')
@@ -99,6 +108,23 @@ class StreamingDataset(IterableDataset):
         self.num_yielded_samples = state_dict['num_yielded_samples']
 
     def __len__(self) -> int:
+        return self.index_meta.num_samples
+
+    def get_identifier_desc(self) -> str:
+        """
+        Returns a short description of the dataset object to store/lookup its FID/FVD/etc statistics.
+        """
+        transforms_desc_long = '-'.join([f'{type(t).__name__}-{str(sorted(vars(t)))}' for t in self.transforms])
+        hasher = hashlib.sha256(transforms_desc_long.encode('utf-8'))
+        transforms_hash = base64.urlsafe_b64encode(hasher.digest()).decode('ascii').rstrip('=')[:12]
+        maxsize_str = f'maxsize{self._max_size}' if self._max_size is not None else ''
+        return f'{self.name}{maxsize_str}-transforms-{transforms_hash}'
+
+    @property
+    def epoch_size(self) -> int:
+        """
+        Returns the size of the epoch, if specified, otherwise returns the total number of samples.
+        """
         return self.index_meta.num_samples
 
     @staticmethod
@@ -195,20 +221,18 @@ class StreamingDataset(IterableDataset):
             self._disk_usage = 0
             self._stored_sample_ids.clear()
 
-        dl_worker_rank, dl_num_workers = dist_utils.get_safe_worker_info()
+        dl_worker_rank, dl_num_workers = dist_utils.get_global_worker_info()
         self._maybe_init_worker_cache_limit(dl_worker_rank, dl_num_workers)
         if self.index_slice is None:
+            logger.debug(f"Loading index slice for worker {dl_worker_rank} with {dl_num_workers} workers.")
             self.index_slice = load_index_slice(self.index_meta, dl_worker_rank, dl_num_workers, dist_utils.get_num_nodes())
+            logger.debug(f"Loaded index slice for worker {dl_worker_rank}: {self.index_slice.shape} rows, {self.index_slice.shape[1]} columns.")
         self.epoch += 1 # TODO: this would be incrementing the epoch each time a new dataloader is called over the dataset, which is not good.
-
-        if self._crash_event is None:
-            self._crash_event = Event()
-        elif self._crash_event.is_set():
-            raise RuntimeError('Background thread failed. Check other traceback.')
 
         # Creating a list of sample IDs to iterate over. Assuming that they will fit in memory.
         sample_ids = list(range(len(self.index_slice)))
         if self.shuffle_seed is not None:
+            logger.debug(f"Shuffling sample IDs with seed {self.shuffle_seed} for worker {dl_worker_rank}.")
             cur_seed = (self.shuffle_seed * 1_000_003 + self.epoch * 1_000_037 + dl_worker_rank * 1_000_039) % (2**32)
             sample_ids = np.random.RandomState(cur_seed).permutation(sample_ids).tolist()
 

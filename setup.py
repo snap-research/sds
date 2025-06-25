@@ -34,7 +34,7 @@ setup(
         "Intended Audience :: Developers",
         "Programming Language :: Python :: 3.11",
     ],
-    packages=find_packages(), # Required
+    packages=find_packages(),
     python_requires=">=3.11",
     install_requires=get_requirements(),
     extras_require={

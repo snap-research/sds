@@ -106,7 +106,7 @@ def sync_print(*args, **kwargs):
         maybe_barrier()
 
 def maybe_barrier(*args, **kwargs) -> Any:
-    return maybe_barrier(*args, **kwargs) if torch.distributed.is_initialized() else None
+    return torch.distributed.barrier(*args, **kwargs) if torch.distributed.is_initialized() else None
 
 def sync_barrier() -> None:
     # Synchronizes all processes by sharing a dummy tensor.
@@ -336,8 +336,9 @@ def broadcast_object_locally(obj: Any, local_src: int = 0) -> Any:
 #----------------------------------------------------------------------------
 # Pytorch dataloader worker info.
 
-def get_safe_worker_info() -> tuple[int, int]:
-    """Get worker info, or default to 0 of 1.
+def get_local_worker_info() -> tuple[int, int]:
+    """
+    Get worker info, or default to 0 of 1.
 
     Returns:
         Tuple[int, int]: Worker ID out of how many workers.
@@ -348,5 +349,18 @@ def get_safe_worker_info() -> tuple[int, int]:
     else:
         ret = 0, 1
     return ret
+
+def get_global_worker_info() -> Tuple[int, int]:
+    """
+    Get global worker info, or default to 0 of 1.
+    We assume that the local worker info is the same across all ranks.
+
+    Returns:
+        Tuple[int, int]: Worker ID out of how many workers.
+    """
+    local_worker_id, local_num_workers = get_local_worker_info()
+    global_worker_id = get_rank() * local_num_workers + local_worker_id
+    global_num_workers = get_world_size() * local_num_workers
+    return global_worker_id, global_num_workers
 
 #----------------------------------------------------------------------------
