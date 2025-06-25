@@ -43,24 +43,45 @@ pip install beartype pytest torch torchvision torchaudio
 
 # Usage
 ### Basic usage
+
+ImageNet-1K data loading example:
 ```python
-
+import torch
+import torchvision.transforms.functional as TVF
 from sds.dataset import StreamingDataset
+from sds.transforms import presets
 
-dataset = StreamingDataset(
-    src='s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet',
-    dst='ignore/tmp',
-    data_type='image',
-    columns_to_download=['data_url'],
-    index_col_name='data_id',
-    num_downloading_workers=10,
+image_transforms = presets.create_standard_image_pipeline(
+    image_field='jpeg',
+    resolution=(256, 256),
+)
+metadata_transforms = presets.create_standard_metadata_pipeline(
+    metadata_field='meta.json',
+    class_label_metadata_field='class',
+    one_hot_encode_to_size=1000,
+    return_raw_metadata=True,
 )
 
-sample = dataset[0] # Downloads (with blocking) the sample and returns it
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, num_workers=3, shuffle=False)
-
-for batch in dataloader: # Loads samples in parallel.
-    print(batch.keys())
+# The original init can take a bit of time, since it downloads the index metadata (400Mb in the case below).
+dataset = StreamingDataset(
+    # src='/nfs/datasets/imagenet-1k/train/',
+    # src='s3://snap-genvid/datasets/imagenet-1k/train/',
+    src='s3://snap-genvid/datasets/imagenet-1k/train.csv', # <= Equivalent to the above, but with precomputed index.
+    # src='s3://snap-genvid/datasets/imagenet-1k/val.csv', # <= Equivalent to the above, but with precomputed index.
+    dst='ignore/tmp',
+    data_type='image',
+    transforms=image_transforms + metadata_transforms,
+    columns_to_download=['jpeg', 'meta.json'],
+    index_col_name='index',
+    num_downloading_workers=3,
+    prefetch=100,
+    shuffle_seed=42,
+)
+sample = dataset[0] # Synchronously downloads a sample and returns it
+data_iterator = iter(torch.utils.data.DataLoader(dataset, batch_size=2, num_workers=3))
+for i in range(10):
+    batch = next(data_iterator)
+TVF.to_pil_image(batch['image'][0]) # Convert the first image to PIL for visualization
 ```
 
 ### Running a simple demo
