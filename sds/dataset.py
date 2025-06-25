@@ -1,17 +1,17 @@
 import os
 import time
 import types
-from typing import Any, Iterator, Generator
+from typing import Any, Iterator
 from collections import deque
 from collections.abc import Callable
 from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 
+import numpy as np
 from torch.utils.data import IterableDataset
 from loguru import logger
 
 from sds.downloader import ParallelDownloader
-from sds.utils.misc import pseudo_shuffle
 from sds.structs import DataSampleType, SampleData, SampleTransform
 from sds.index import build_index, load_index_slice, load_index_row
 import sds.utils.distributed as dist_utils
@@ -70,7 +70,7 @@ class StreamingDataset(IterableDataset):
         self.num_yielded_samples = 0
 
         self.build_index() # Build the index metadata. TODO: it's slow sometimes, so maybe we should to it lazily.
-        self.index = None # Index will be initialized in __iter__(), when we know the workers.
+        self.index_slice = None # Index will be initialized in __iter__(), when we know the workers.
 
         self._executor: ThreadPoolExecutor | None = None # A background thread to do call downloading/deletion to not block the main thread.
         self._crash_event: Event | None = None  # An event to signal if the background thread has crashed.
@@ -103,9 +103,9 @@ class StreamingDataset(IterableDataset):
 
     @staticmethod
     def partition_len(self) -> int:
-        if self.index is None:
+        if self.index_slice is None:
             raise RuntimeError("Index is not initialized. Call __iter__() first.")
-        return len(self.index)
+        return len(self.index_slice)
 
     def __getitem__(self, sample_id: int) -> dict[str, Any]:
         """
@@ -137,11 +137,11 @@ class StreamingDataset(IterableDataset):
         return downloading_result # Return smth meaningful only for blocking calls.
 
     def _schedule_downloads(self, sample_ids: list[int]) -> list[dict[str, Any]]:
-        processed_sample_metas: list[dict[str, Any]] = []
+        processed_sample_metas: list[dict[str, Any]] = [None] * len(sample_ids)  # Preallocate a list to store processed sample metas.
         for sample_id in sample_ids:
-            sample_meta: dict[str, Any] = self.index.iloc[sample_id].to_dict()
+            sample_meta: dict[str, Any] = self.index_slice.iloc[sample_id].to_dict()
             self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=False)
-            processed_sample_metas.append(sample_meta)
+            processed_sample_metas[sample_id] = sample_meta  # Store the sample meta in the preallocated list.
         logger.debug(f"Scheduled {len(processed_sample_metas)} samples for download with {self.downloader}.")
         return processed_sample_metas
 
@@ -197,8 +197,8 @@ class StreamingDataset(IterableDataset):
 
         dl_worker_rank, dl_num_workers = dist_utils.get_safe_worker_info()
         self._maybe_init_worker_cache_limit(dl_worker_rank, dl_num_workers)
-        if self.index is None:
-            self.index = load_index_slice(self.index_meta, dl_worker_rank, dl_num_workers, dist_utils.get_num_nodes())
+        if self.index_slice is None:
+            self.index_slice = load_index_slice(self.index_meta, dl_worker_rank, dl_num_workers, dist_utils.get_num_nodes())
         self.epoch += 1 # TODO: this would be incrementing the epoch each time a new dataloader is called over the dataset, which is not good.
 
         if self._crash_event is None:
@@ -207,24 +207,23 @@ class StreamingDataset(IterableDataset):
             raise RuntimeError('Background thread failed. Check other traceback.')
 
         # Creating a list of sample IDs to iterate over. Assuming that they will fit in memory.
+        sample_ids = list(range(len(self.index_slice)))
         if self.shuffle_seed is not None:
-            cur_seed = (self.shuffle_seed * 1_000_003 + self.epoch * 1_000_037 + self.worker * 1_000_039) % (2**32)
-            sample_ids = pseudo_shuffle(len(self.index), cur_seed)
-        else:
-            sample_ids = list(range(len(self.index)))
+            cur_seed = (self.shuffle_seed * 1_000_003 + self.epoch * 1_000_037 + dl_worker_rank * 1_000_039) % (2**32)
+            sample_ids = np.random.RandomState(cur_seed).permutation(sample_ids).tolist()
 
         # worker_sample_id_offset = dl_worker_rank * (len(sample_ids) // dl_num_workers)
         # sample_ids = sample_ids[worker_sample_id_offset:]
         processed_sample_metas: list[dict[str, Any]] = self._schedule_downloads(sample_ids)
 
         for sample_id, total_size in self.downloader.yield_completed_keys():
-            logger.debug(f"Processing sample {sample_id} with size {total_size} bytes.")
             processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD] = total_size
             self._stored_sample_ids.append(sample_id)
             self._disk_usage += total_size
             yield from self._construct_samples(processed_sample_metas[sample_id])
             self._maybe_evict_cold_samples(processed_sample_metas)
             self._gc.maybe_collect()
+            self.num_yielded_samples += 1
         logger.debug(f"Yielded {self.num_yielded_samples} samples in epoch {self.epoch}.")
         self.downloader.wait_completion()
 

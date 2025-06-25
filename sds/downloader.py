@@ -93,6 +93,7 @@ class ParallelDownloader:
         """
         for dst in downloading_task.destinations:
             if os.path.exists(dst):
+                logger.debug(f"Removing failed download file: {dst}")
                 try:
                     os.remove(dst)
                 except Exception as e:

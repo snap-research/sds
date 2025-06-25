@@ -2,12 +2,10 @@
 Some functions which help to build the index of src paths/urls for a dataset.
 """
 import os
-import random
 from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
-import torch
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
