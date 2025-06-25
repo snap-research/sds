@@ -1,47 +1,21 @@
-# Streaming Dataset
+## Streaming Dataset for the People
 
-A streaming dataset lib which loads data in a streaming fashion:
-- Data samples (+ possibly their metadata) are stored as raw files
-- The dataset downloads and yields them on the fly
-- Supports constructing the dataset from a CSV/parquet/json index, file directory, CSV/parquet/json wildcard or "`split_file_texts.txt`"
-- Decodes images/videos/audios through sample data processing callbacks (could be easily extended)
-- Supports
+A streaming dataset which fetches and yields samples on the fly, witch caching/eviction and random access. Features:
+- *Very* flexible in terms of data sources:
+  - Can be constructed from a CSV/parquet/json index, file directory, CSV/parquet/json wildcard or "`split_file_texts.txt`"
+  - Supports remote and local data sources (e.g., S3, HTTP, local files, etc.)
+- Has caching and eviction logic, so that you can efficiently work with large datasets without hitting disk space limits.
+- Has standard data processing transforms for images, videos, audios, text, and metadata.
+- Supports random access (through blocking calls)!
 
-# TODO
-- [x] Index construction
-- [ ] Dataset iterator
-- [x] Shuffling each epoch
-- [ ] Lazy index so that we can efficiently initialize large datasets on a single node without hitting disk space limits
-- [x] Cache data + evict cold samples
-- [ ] Video decoding
-- [ ] Audio loading
-- [ ] Tutorial/usage examples
-- [ ] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
-- [ ] More test coverage
-- [ ] Documentation
-- [x] Support for data provides as callbacks (possibly via forward/backward translation)
-- [x] There is no global shuffling right now, so smth like ImageNet training will be flawed.
-- [ ] Evict samples inside random access queries as well.
-- [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
-- [ ] Fix TODOs in the codebase.
-- [ ] Remove logging calls from the codebase.
-- [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
-- [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
-- [ ] Shutdown for num_workers > 0 is quite slow. Not sure why.
-- [x] Clean broken samples from disk.
-- [x] Time-based garbage collection.
-- [ ] State dict management.
-- [x] Can we construct a remote S3 index in parallel?
-- [x] Construct an index for a local/remote directory.
-- [ ] Sometimes, we can have less raw index files that nodes.
+## Installation
 
-# Installation
-
+Clone the repository and install the requirements:
 ```bash
-pip install beartype pytest torch torchvision torchaudio
+pip install -r requirements.txt
 ```
 
-# Usage
+## Usage
 ### Basic usage
 
 ImageNet-1K data loading example:
@@ -97,7 +71,7 @@ python scripts/construct_index.py --src s3://snap-genvid/datasets/tmp/ --dst s3:
 ```
 After the index is constructed, you can simply replace your `src` argument with the index file path, e.g. `s3://snap-genvid/datasets/tmp-index.csv`.
 
-# How it works
+## How it works
 The entry point is the `StreamingDataset` class, which takes a source `src` and arguments and does the following:
 1. It constructs an index from the source:
     - if `src` is a local or remote CSV/parquet/json file, it reads the index from there.
@@ -112,13 +86,42 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 7. The are "presets" of sample transforms which should cover 80% of the cases for image/video/text-to-video/etc use cases.
 8. Caching and eviction logic is performed by the StreamingDataset class, which keeps track of downloaded file sizes and evicts the oldest ones when the cache size exceeds the threshold. Currently, the cache size is set naively per workers as `node_cache_size / num_workers`, assuming that each worker has equal load.
 
-# Development
+## Contributing
+### TODOs
+- [x] Index construction
+- [ ] Dataset iterator
+- [x] Shuffling each epoch
+- [ ] Lazy index so that we can efficiently initialize large datasets on a single node without hitting disk space limits
+- [x] Cache data + evict cold samples
+- [ ] Video decoding
+- [ ] Audio loading
+- [ ] Tutorial/usage examples
+- [ ] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
+- [ ] More test coverage
+- [ ] Documentation
+- [x] Support for data provides as callbacks (possibly via forward/backward translation)
+- [x] There is no global shuffling right now, so smth like ImageNet training will be flawed.
+- [ ] Evict samples inside random access queries as well.
+- [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
+- [ ] Fix TODOs in the codebase.
+- [ ] Remove logging calls from the codebase.
+- [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
+- [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
+- [ ] Shutdown for num_workers > 0 is quite slow. Not sure why.
+- [x] Clean broken samples from disk.
+- [x] Time-based garbage collection.
+- [ ] State dict management.
+- [x] Can we construct a remote S3 index in parallel?
+- [x] Construct an index for a local/remote directory.
+- [ ] Sometimes, we can have less raw index files that nodes.
+
+
 ### Running tests
 ```bash
 PYTHONPATH=. pytest tests
 ```
 
-### Contributing
+### Style guide
 Create your own branch, make changes, and create a pull request.
 
 Style guide:
