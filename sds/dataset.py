@@ -216,7 +216,7 @@ class StreamingDataset(IterableDataset):
         if self.downloader.thread_pool is None:
             self.downloader.init_thread_pool()
         else:
-            self.downloader.clear_pending_downloads()
+            self.downloader.reset()
             # TODO: this looks like a bug.
             self._disk_usage = 0
             self._stored_sample_ids.clear()

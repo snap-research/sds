@@ -73,8 +73,8 @@ class ParallelDownloader:
                 retries=self.num_retries,
             )
 
-    def clear_pending_downloads(self):
-        self.thread_pool.clear_pending_tasks()
+    def reset(self):
+        self.thread_pool.reset()
 
     def wait_completion(self):
         self.thread_pool.wait_completion()

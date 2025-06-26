@@ -136,6 +136,19 @@ class LazyThreadPool:
 
         return num_cleared
 
+    def drain_completed_tasks(self) -> int:
+        while not self.completed_queue.empty():
+            try:
+                self.completed_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def reset(self):
+        self.num_tasks_scheduled = 0
+        self.num_tasks_completed = 0
+        self.clear_pending_tasks()
+        self.drain_completed_tasks()
+
     def yield_completed(self) -> iter:
         """
         Yields completed task results as they become available.
