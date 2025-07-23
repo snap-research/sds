@@ -249,7 +249,6 @@ class StreamingDataset(IterableDataset):
             self._gc.maybe_collect()
             self.num_yielded_samples += 1
         logger.debug(f"Yielded {self.num_yielded_samples} samples in epoch {self.epoch}.")
-        self.downloader.wait_completion()
 
 #----------------------------------------------------------------------------
 
