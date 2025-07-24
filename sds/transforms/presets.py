@@ -85,22 +85,15 @@ class ConvertImageToByteTensorTransform(BaseTransform):
 @beartype
 class DecodeVideoTransform(BaseTransform):
     """A video transform which decodes a video file into a list of frames."""
-    def __init__(self, input_field: str, num_frames: int, framerate: float | None=None, allow_shorter_videos: bool=False, output_field: str | None = None):
+    def __init__(self, input_field: str, num_frames: int, output_field: str | None = None, **decode_kwargs):
         self.input_field = input_field
         self.output_field = output_field if output_field is not None else input_field
         self.num_frames = num_frames
-        self.framerate = framerate
-        self.allow_shorter_videos = allow_shorter_videos
-
-        assert not self.allow_shorter_videos, "Not supported yet."
+        self.decode_kwargs = decode_kwargs
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[])
-        sample[self.output_field] = SDF.decode_frames_from_video(
-            video_file=sample[self.input_field],
-            num_frames_to_extract=self.num_frames,
-            framerate=self.framerate,
-        )
+        sample[self.output_field] = SDF.decode_frames_from_video(video_file=sample[self.input_field], num_frames_to_extract=self.num_frames, **self.decode_kwargs)
         return sample
 
 @beartype
@@ -296,8 +289,7 @@ def create_standard_metadata_pipeline(
 def create_standard_video_pipeline(
     video_field: str,
     num_frames: int,
-    framerate: float = None, # Target framerate to decode the video at. By default, it will be the original framerate.
-    allow_shorter_videos: bool = False, # Should we output shorter videos if the video is shorter than num_frames?
+    decode_kwargs={}, # Extra decoding parameters for DecodeVideoTransform
     **resize_kwargs,
 ):
     """
@@ -305,7 +297,7 @@ def create_standard_video_pipeline(
     """
     transforms: list[SampleTransform] = [
         RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
-        DecodeVideoTransform(input_field='video', num_frames=num_frames, framerate=framerate, allow_shorter_videos=allow_shorter_videos),
+        DecodeVideoTransform(input_field='video', num_frames=num_frames, **decode_kwargs),
         ResizeVideoTransform(input_field='video', **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field='video'),
     ]
