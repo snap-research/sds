@@ -165,8 +165,11 @@ class StreamingDataset(IterableDataset):
     def _schedule_downloads(self, sample_ids: list[int]) -> list[dict[str, Any]]:
         processed_sample_metas: list[dict[str, Any]] = [None] * len(sample_ids)  # Preallocate a list to store processed sample metas.
         for sample_id in sample_ids:
-            sample_meta: dict[str, Any] = self.index_slice.iloc[sample_id].to_dict()
-            self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=False)
+            try:
+                sample_meta: dict[str, Any] = self.index_slice.iloc[sample_id].to_dict()
+                self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=False)
+            except Exception as e:
+                logger.error(f"Failed to schedule download for sample {sample_id}: {e}")
             processed_sample_metas[sample_id] = sample_meta  # Store the sample meta in the preallocated list.
         logger.debug(f"Scheduled {len(processed_sample_metas)} samples for download with {self.downloader}.")
         return processed_sample_metas
@@ -209,7 +212,7 @@ class StreamingDataset(IterableDataset):
             logger.debug(f"Deleted file {file_path} for sample {sample_meta[self.index_col_name]}.")
 
     def __del__(self):
-        if self.downloader is not None:
+        if hasattr(self, 'downloader') and self.downloader is not None:
             self.downloader.shutdown()
 
     def __iter__(self) -> Iterator[dict[str, Any]]:

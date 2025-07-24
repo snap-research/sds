@@ -153,14 +153,13 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
     # For this, we first want to group the files by their keys using the existing keys as prefixes.
     # We must be careful since some files are named {key}.{ext1}.{ext2}.{...}.json
     data = {k: {} for k in main_file_keys}  # Initialize a dict with keys as the base names of the files.
-    unique_exts = set()
     for file in files_list:
         key = os_utils.file_key(file) # Get the key (base name without extension) of the file.
         full_ext = os_utils.file_full_ext(file).lower() # Get the full extension (e.g., .jpg, .txt, etc.)
-        assert key in data, f"Key {key} not found in data."
-        assert full_ext not in data[key], f"Duplicate key found: {key} with extension {full_ext}. Please ensure unique keys in the dataset."
+        if key not in data:
+            continue # Skipping a file since it's some random file which is not matched with the main keys.
+        assert full_ext not in data[key], f"Duplicate key found: {key} with extension {full_ext}. This is an SDS bug, and we have a problem with data processing."
         data[key][full_ext[1:]] = file # Store the file path under the key and extension.
-        unique_exts.add(full_ext)
 
     # Convert the dict to a DataFrame
     INDEX_COL_NAME = 'index'

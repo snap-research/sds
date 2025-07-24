@@ -126,30 +126,35 @@ def _apply_crop(x: Image.Image | torch.Tensor, crop: tuple[int, int, int, int]) 
 
 @beartype
 def decode_frames_from_video(
-        num_frames_total: int,
-        num_frames_to_extract: int,
         video_file: bytes | str | None=None,
+        num_frames_to_extract: int=1,
+        num_frames_total: int | None=None,
         video_decoder: VideoDecoder | None=None,
         random_offset: bool=True,
         frame_seek_timeout_sec: float=5.0,
         allow_shorter_videos: bool=False,
-        frames_idx: NDArray | None =None,
-    ) -> NDArray:
+        framerate: float | None = None,
+    ) -> list[Image.Image]:
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
     """
-    if frames_idx is None:
-        num_frames_to_extract = min(num_frames_total, num_frames_to_extract) if allow_shorter_videos else num_frames_to_extract
-        assert num_frames_total >= num_frames_to_extract, f"Video has only {num_frames_total} frames, but we need at least {num_frames_to_extract} frames."
-        start_frame_idx = np.random.randint(low=0, high=num_frames_to_extract + 1) if random_offset else 0
-        frames_idx = np.arange(start_frame_idx, start_frame_idx + num_frames_to_extract) # [num_frames]
     if video_decoder is None:
         assert video_file is not None, "Video bytes must be provided if no video decoder is specified."
         video_decoder = VideoDecoder(file=video_file)
-    frames = video_decoder.decode_frames_at_indexes(frames_idx, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)
+    if num_frames_total is None:
+        num_frames_total = video_decoder.video_stream.frames # Relying on a guessed amount of frames in the video stream.
+
+    base_framerate = video_decoder.framerate
+    target_framerate = base_framerate if framerate is None else framerate
+
+    num_frames_to_extract = min(num_frames_total, num_frames_to_extract) if allow_shorter_videos else num_frames_to_extract
+    clip_duration_to_extract = num_frames_to_extract / target_framerate
+    video_duration = num_frames_total / base_framerate
+    start_frame_timestamp = np.random.rand() * (video_duration - clip_duration_to_extract) if random_offset else 0.0
+    frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration_to_extract, num_frames_to_extract,)
+    frames = video_decoder.decode_frames_at_times(frame_timestamps, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)
 
     return frames
-
 
 #----------------------------------------------------------------------------
 # Miscellaneous transforms.

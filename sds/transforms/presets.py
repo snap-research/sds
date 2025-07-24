@@ -5,6 +5,7 @@ They are structured as classes because they need to be pickleable for distribute
 """
 import io
 import json
+import torch
 from typing import Any
 
 from beartype import beartype
@@ -27,22 +28,30 @@ def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], a
         assert field not in sample, f"Field '{field}' should not be present in sample with keys {list(sample.keys())}."
 
 #----------------------------------------------------------------------------
+# Base transforms.
+class BaseTransform:
+    """Base class for all transforms. Provides a common interface."""
+    def __init__(self, input_field: str, output_field: str | None = None, **transform_kwargs):
+        self.input_field = input_field
+        self.output_field = output_field if output_field is not None else input_field
+        self.transform_kwargs = transform_kwargs
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        raise NotImplementedError("Subclasses must implement the __call__ method.")
+
+#----------------------------------------------------------------------------
 # Image processing transforms.
 
 @beartype
-class DecodeImageTransform:
+class DecodeImageTransform(BaseTransform):
     """Decodes an image file into a [c, h, w] torch tensor."""
-    def __init__(self, input_field: str, output_field: str | None = None):
-        self.input_field = input_field
-        self.output_field = output_field if output_field is not None else input_field
-
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[])
         sample[self.output_field] = SDF.load_image_from_bytes(sample[self.input_field])
         return sample
 
 @beartype
-class ResizeImageTransform:
+class ResizeImageTransform(BaseTransform):
     """Resizes images to the specified resolution."""
     def __init__(self, input_field: str, output_field: str | None = None, **resize_kwargs):
         self.input_field = input_field
@@ -55,24 +64,16 @@ class ResizeImageTransform:
         return sample
 
 @beartype
-class ReshapeImageAsVideoTransform:
-    """Reshapes a single image tensor into a single-frame video tensor."""
-    def __init__(self, input_field: str, output_field: str):
-        self.input_field = input_field
-        self.output_field = output_field
-
+class ReshapeImageAsVideoTransform(BaseTransform):
+    """Reshapes an image into a single-frame video."""
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[self.output_field])
         sample[self.output_field] = SDF.reshape_image_as_single_frame_video(sample[self.input_field])
         return sample
 
 @beartype
-class ConvertImageToByteTensorTransform:
+class ConvertImageToByteTensorTransform(BaseTransform):
     """Converts an image to a torch tensor."""
-    def __init__(self, input_field: str, output_field: str | None = None):
-        self.input_field = input_field
-        self.output_field = output_field if output_field is not None else input_field
-
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present={self.input_field: Image.Image}, absent=[])
         sample[self.output_field] = SDF.convert_pil_image_to_byte_tensor(sample[self.input_field])
@@ -82,29 +83,40 @@ class ConvertImageToByteTensorTransform:
 # Video processing transforms.
 
 @beartype
-class DecodeVideoTransform:
+class DecodeVideoTransform(BaseTransform):
     """A video transform which decodes a video file into a list of frames."""
-    def __init__(self, input_field: str, output_field: str, **decoding_kwargs):
+    def __init__(self, input_field: str, num_frames: int, framerate: float | None=None, allow_shorter_videos: bool=False, output_field: str | None = None):
         self.input_field = input_field
-        self.output_field = output_field
-        self.decoding_kwargs = decoding_kwargs
+        self.output_field = output_field if output_field is not None else input_field
+        self.num_frames = num_frames
+        self.framerate = framerate
+        self.allow_shorter_videos = allow_shorter_videos
+
+        assert not self.allow_shorter_videos, "Not supported yet."
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[])
-        sample[self.output_field] = SDF.decode_frames_from_video(sample[self.input_field], **self.decoding_kwargs)
+        sample[self.output_field] = SDF.decode_frames_from_video(
+            video_file=sample[self.input_field],
+            num_frames_to_extract=self.num_frames,
+            framerate=self.framerate,
+        )
         return sample
 
 @beartype
-class ResizeVideoTransform:
+class ResizeVideoTransform(BaseTransform):
     """Resizes each frame in the video to the specified resolution."""
-    def __init__(self, input_field: str, output_field: str | None = None, **resize_kwargs):
-        self.input_field = input_field
-        self.output_field = output_field if output_field is not None else input_field
-        self.resize_kwargs = resize_kwargs
-
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[])
-        sample[self.output_field] = SDF.lean_resize_frames(frames=sample[self.input_field], **self.resize_kwargs)
+        sample[self.output_field] = SDF.lean_resize_frames(frames=sample[self.input_field], **self.transform_kwargs)
+        return sample
+
+@beartype
+class ConvertVideoToByteTensorTransform(BaseTransform):
+    """Converts an image to a torch tensor."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: list}, absent=[])
+        sample[self.output_field] = torch.stack([SDF.convert_pil_image_to_byte_tensor(x) for x in sample[self.input_field]]) # [t, c, h, w]
         return sample
 
 #----------------------------------------------------------------------------
@@ -124,12 +136,8 @@ class PickleLoaderTransform:
         return sample
 
 @beartype
-class LoadJsonMetadataTransform:
+class LoadJsonMetadataTransform(BaseTransform):
     """Loads metadata from a JSON file."""
-    def __init__(self, input_field: str, output_field: str | None = None):
-        self.input_field = input_field
-        self.output_field = output_field if output_field is not None else input_field
-
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present={self.input_field: bytes}, absent=[])
         sample[self.output_field] = json.loads(sample[self.input_field])
@@ -166,7 +174,7 @@ class OneHotEncodeTransform:
 # Misc data-processing transforms.
 
 @beartype
-class NameToIndexMappingTransform:
+class NameToIndexTransform:
     """Is used to augment with dataset IDs by mapping a string field to an index."""
     def __init__(self, field: str, name_to_index_mapping: dict[str, int]):
         self.field = field
@@ -285,11 +293,24 @@ def create_standard_metadata_pipeline(
 
 # Note: These pipelines can now be built using the class-based transforms above.
 @beartype
-def create_standard_video_pipeline():
+def create_standard_video_pipeline(
+    video_field: str,
+    num_frames: int,
+    framerate: float = None, # Target framerate to decode the video at. By default, it will be the original framerate.
+    allow_shorter_videos: bool = False, # Should we output shorter videos if the video is shorter than num_frames?
+    **resize_kwargs,
+):
     """
     Creates a standard text/video dataloading transform, which loads and decodes a video.
     """
-    raise NotImplementedError
+    transforms: list[SampleTransform] = [
+        RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
+        DecodeVideoTransform(input_field='video', num_frames=num_frames, framerate=framerate, allow_shorter_videos=allow_shorter_videos),
+        ResizeVideoTransform(input_field='video', **resize_kwargs),
+        ConvertVideoToByteTensorTransform(input_field='video'),
+    ]
+
+    return transforms
 
 @beartype
 def create_standard_text_image_pipeline():
@@ -297,6 +318,14 @@ def create_standard_text_image_pipeline():
 
 @beartype
 def create_standard_text_video_pipeline():
+    raise NotImplementedError
+
+@beartype
+def create_standard_image_latents_pipeline():
+    raise NotImplementedError
+
+@beartype
+def create_standard_video_latents_pipeline():
     raise NotImplementedError
 
 #----------------------------------------------------------------------------
