@@ -185,14 +185,18 @@ class StreamingDataset(IterableDataset):
         # Some transforms may return multiple samples, so we yield from them instead of returning a single sample.
         yield from apply_transforms_recursively(sample, self.transforms)
 
-    def _maybe_evict_cold_samples(self, processed_sample_metas: dict[str, Any]) -> bool:
+    def _maybe_evict_cold_samples(self, processed_sample_metas: dict[str, Any]):
         assert self._worker_cache_limit is not None, "Worker cache limit must be set before eviction."
         while self._disk_usage > self._worker_cache_limit:
-            assert len(self._stored_sample_ids) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._worker_cache_limit}."
-            sample_id = self._stored_sample_ids.popleft() # Get the oldest sample key to evict.
-            self._delete_sample_from_disk(processed_sample_metas[sample_id])
-            self._disk_usage -= processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD]
-            logger.debug(f"Current disk usage: {self._disk_usage} bytes, cache limit: {self._worker_cache_limit} bytes.")
+            try:
+                assert len(self._stored_sample_ids) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._worker_cache_limit}."
+                sample_id = self._stored_sample_ids.popleft() # Get the oldest sample key to evict.
+                self._delete_sample_from_disk(processed_sample_metas[sample_id])
+                self._disk_usage -= processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD]
+                logger.debug(f"Current disk usage: {self._disk_usage} bytes, cache limit: {self._worker_cache_limit} bytes.")
+            except Exception as e:
+                logger.error(f"Failed to evict sample: {e}")
+                break
 
     def _maybe_init_worker_cache_limit(self, dl_worker_rank: int, dl_num_workers: int) -> None:
         if self._worker_cache_limit is not None:
@@ -247,7 +251,11 @@ class StreamingDataset(IterableDataset):
             processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD] = total_size
             self._stored_sample_ids.append(sample_id)
             self._disk_usage += total_size
-            yield from self._construct_samples(processed_sample_metas[sample_id])
+            try:
+                yield from self._construct_samples(processed_sample_metas[sample_id])
+            except Exception as e:
+                logger.error(f"Failed to construct samples from {sample_id}: {e}")
+                continue
             self._maybe_evict_cold_samples(processed_sample_metas)
             self._gc.maybe_collect()
             self.num_yielded_samples += 1
