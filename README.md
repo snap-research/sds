@@ -93,7 +93,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Shuffling each epoch
 - [ ] Lazy index so that we can efficiently initialize large datasets on a single node without hitting disk space limits
 - [x] Cache data + evict cold samples
-- [ ] Video decoding
+- [x] Video decoding
 - [ ] Audio loading
 - [ ] Tutorial/usage examples
 - [ ] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
@@ -114,6 +114,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Can we construct a remote S3 index in parallel?
 - [x] Construct an index for a local/remote directory.
 - [ ] Sometimes, we can have less raw index files that nodes.
+- [x] Missing fields should be populated in the dataloader or index meta or where? (I guess, they should automatically be filled with `None` in the index).
 
 
 ### Running tests

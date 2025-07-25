@@ -78,20 +78,24 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     It's an intra-node index, meaning that each node will process its own subset of data.
     """
     index_type = IndexType.INTRA_NODE
-    src_ext = os_utils.file_ext(src).lower()
     # We are processing a list of CSV/JSON/PARQUET files (possibly stored in S3).
     if src.endswith('/split_file_paths.txt'):
         # That's a special case: we receive a file containing a list of index paths, one per line.
         # Let's load it, read and distribute the data across ranks.
-        dst = os.path.join(dst_dir, 'split_file_paths.txt')
+        dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, 'split_file_paths.txt')
         with dist_utils.leader_first(local=True, skip_non_leaders=True):
-            CloudDownloader.get(src).direct_download(remote=src, local=os.path.join(dst_dir, RAW_INDEX_FILES_DIR, 'split_file_paths.txt'))
+            CloudDownloader.get(src).direct_download(remote=src, local=dst)
         with open(dst, 'r') as f:
             index_files_list = [line.strip() for line in f if line.strip()]
+        src_exts = {os_utils.file_ext(f).lower() for f in index_files_list}
+        assert len(src_exts) == 1, f"Expected all files to have the same extension, but found: {src_exts}. This is an SDS bug, and we have a problem with data processing."
+        src_ext = src_exts.pop()  # Get the single extension from the set.
     else:
         # Index files are passed as a wildcard path (e.g., 's3://bucket/path/*.csv'). Let's find them all.
+        src_ext = os_utils.file_ext(src).lower()
         index_files_list = os_utils.find_files_in_src(src.replace(f'*{src_ext}', ''), exts={src_ext}) # Remove the wildcard from the src path.
 
+    assert src_ext in ['.csv', '.json', '.parquet'], f"Expected the index files to be in CSV, JSON or PARQUET format, but found: {src_ext}. This is an SDS bug, and we have a problem with data processing."
 
     # Once we have the list of files, we need to distribute them across nodes.
     # We distribute the data across nodes on a per-file basis instead of per-sample basis. This mainly affects shuffling.

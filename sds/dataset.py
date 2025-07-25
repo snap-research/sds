@@ -47,6 +47,7 @@ class StreamingDataset(IterableDataset):
         cache_limit: str | None='100mb', # The limit of the cache size in bytes. If None, no limit is applied.
         max_size: int | None=None, # Cuts the amount of samples to this size, if specified. Useful for debugging or testing.
         resolution: Any=None, # TODO: dirty hack to support the genvid repo...
+        allow_missing_columns: bool=False, # If True, ignore missing columns in the index file.
     ):
         _ = resolution # Unused, kept for compatibility with the genvid repo.
         self.name: str = name if name is not None else os_utils.file_key(src)
@@ -67,6 +68,7 @@ class StreamingDataset(IterableDataset):
         self._disk_usage = 0 # Current cache usage in bytes.
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
         self._gc = os_utils.TimeBasedGarbageCollector(interval_seconds=30)
+        self.allow_missing_columns = allow_missing_columns
 
         assert self.index_col_name not in self.columns_to_download, f"Index column {self.index_col_name} cannot be in columns_to_download: {self.columns_to_download}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
@@ -147,8 +149,11 @@ class StreamingDataset(IterableDataset):
         return next(self._construct_samples(sample_meta))
 
     def _schedule_download_(self, key: int | str, sample_meta: dict[str, Any], blocking: bool=False) -> Any:
-        source_urls: list[str] = [sample_meta[col] for col in self.columns_to_download]
-        destinations: list[str] = [os.path.join(self.dst, self.name, sample_meta[self.index_col_name] + os_utils.file_ext(sample_meta[col]).lower()) for col in self.columns_to_download]
+        columns_to_download = [col for col in self.columns_to_download if col in sample_meta and sample_meta[col] is not None and sample_meta[col] != '']
+        assert self.allow_missing_columns or len(columns_to_download) == len(self.columns_to_download), \
+            f"Some columns are missing in the sample meta: {sample_meta}. Expected columns: {self.columns_to_download}, available columns: {columns_to_download}."
+        source_urls: list[str] = [sample_meta[col] for col in columns_to_download]
+        destinations: list[str] = [os.path.join(self.dst, self.name, sample_meta[self.index_col_name] + os_utils.file_ext(sample_meta[col]).lower()) for col in columns_to_download]
         downloading_result = self.downloader.schedule_task(
             key=key,
             source_urls=source_urls,
@@ -156,7 +161,7 @@ class StreamingDataset(IterableDataset):
             blocking=blocking,
         )
         # Fill the sample_meta with the destination paths.
-        for col, dst in zip(self.columns_to_download, destinations):
+        for col, dst in zip(columns_to_download, destinations):
             sample_meta[col] = dst
         sample_meta[PROCESSED_FIELD] = True  # Mark the sample as processed.
 
@@ -165,11 +170,11 @@ class StreamingDataset(IterableDataset):
     def _schedule_downloads(self, sample_ids: list[int]) -> list[dict[str, Any]]:
         processed_sample_metas: list[dict[str, Any]] = [None] * len(sample_ids)  # Preallocate a list to store processed sample metas.
         for sample_id in sample_ids:
+            sample_meta: dict[str, Any] = self.index_slice.iloc[sample_id].to_dict()
             try:
-                sample_meta: dict[str, Any] = self.index_slice.iloc[sample_id].to_dict()
                 self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=False)
             except Exception as e:
-                logger.error(f"Failed to schedule download for sample {sample_id}: {e}")
+                logger.error(f"Failed to schedule download for sample {sample_meta}: {e}")
             processed_sample_metas[sample_id] = sample_meta  # Store the sample meta in the preallocated list.
         logger.debug(f"Scheduled {len(processed_sample_metas)} samples for download with {self.downloader}.")
         return processed_sample_metas

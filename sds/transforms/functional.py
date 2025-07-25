@@ -13,7 +13,14 @@ from PIL import Image
 import torch
 import torchvision.transforms.functional as TVF
 
+try:
+    import torchaudio # Only import if available since it is an optional dependency.
+except ImportError:
+    torchaudio = None
+
+from sds.structs import VIDEO_EXT
 from sds.transforms.video_decoder import VideoDecoder
+from sds.utils import os_utils
 
 #----------------------------------------------------------------------------
 # Image/video processing functions.
@@ -138,9 +145,12 @@ def decode_frames_from_video(
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
     """
+    should_close_decoder = video_decoder is None
     if video_decoder is None:
         assert video_file is not None, "Video bytes must be provided if no video decoder is specified."
+        assert isinstance(video_file, bytes) or os_utils.file_ext(video_file) in VIDEO_EXT, f"Unsupported video file type: {video_file}. Supported types: {VIDEO_EXT}."
         video_decoder = VideoDecoder(file=video_file)
+        should_close_decoder = True # We should close it since it's us who opened it.
     if num_frames_total is None:
         num_frames_total = video_decoder.video_stream.frames # Relying on a guessed amount of frames in the video stream.
 
@@ -150,26 +160,39 @@ def decode_frames_from_video(
     num_frames_to_extract = min(num_frames_total, num_frames_to_extract) if allow_shorter_videos else num_frames_to_extract
     clip_duration_to_extract = num_frames_to_extract / target_framerate
     video_duration = num_frames_total / base_framerate
-    start_frame_timestamp = np.random.rand() * (video_duration - clip_duration_to_extract) if random_offset else 0.0
+    assert video_duration >= clip_duration_to_extract or allow_shorter_videos, \
+        f"Video duration {video_duration} is shorter than the requested clip duration {clip_duration_to_extract} while allow_shorter_videos={allow_shorter_videos}."
+    start_frame_timestamp = np.random.rand() * max(video_duration - clip_duration_to_extract, 0.0) if random_offset else 0.0
     frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration_to_extract, num_frames_to_extract,)
+    frame_timestamps = [t for t in frame_timestamps if t <= video_duration] # Filter out timestamps that are beyond the video duration.
     frames = video_decoder.decode_frames_at_times(frame_timestamps, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)
 
+    if should_close_decoder:
+        video_decoder.close()
+
     return frames
+
+#----------------------------------------------------------------------------
+# Audio processing functions.
+
+# TODO.
 
 #----------------------------------------------------------------------------
 # Miscellaneous transforms.
 
 @beartype
-def convert_pickle_embeddings_to_numpy(embeddings_raw_str, label_shape: tuple[int]) -> NDArray:
+def load_pickle_embeddings(embeddings_path: str, num_tokens: int) -> torch.Tensor:
     """
-    Converts raw pickle embeddings into a numpy matrix (with paddings).
-    TODO: dtype is either string or bytes.
+    Loads raw pickle embeddings and converts them into a torch 2D tensor (with paddings).
+    TODO: make it support a bytes input as well.
     """
-    embeddings_data = pickle.loads(embeddings_raw_str)
-    embeddings = embeddings_data['embeddings'] # [num_text_tokens, d]
-    embeddings[embeddings_data['eot_location'] + 1:] = 0.0
-    embeddings = embeddings[:label_shape[0]] # [num_text_tokens, d]
-    embeddings = np.concatenate([embeddings, np.zeros((label_shape[0] - embeddings.shape[0], embeddings.shape[1]))], axis=0).astype(np.float32) # [num_text_tokens, d]
+    with open(embeddings_path, 'rb') as f:
+        embeddings_data = pickle.load(f)
+    embeddings = embeddings_data['embeddings'] # [num_tokens, d]
+    embeddings[embeddings_data['eot_location'] + 1:] = 0.0 # Making sure that we have no junk after the EOT token.
+    embeddings = embeddings[:num_tokens] # [num_tokens, d]
+    paddings = torch.zeros((num_tokens - embeddings.shape[0], embeddings.shape[1]), dtype=embeddings.dtype, device=embeddings.device) # [num_paddings, d]
+    embeddings = torch.cat([embeddings, paddings], axis=0) # [num_tokens, d]
 
     return embeddings
 
@@ -186,33 +209,5 @@ def one_hot_encode(label: int, num_classes: int) -> NDArray:
     one_hot = np.zeros(num_classes, dtype=np.float32)
     one_hot[label] = 1.0
     return one_hot
-
-#----------------------------------------------------------------------------
-# Processing functions for the streaming dataset.
-
-def construct_frame_resize_callback(
-        resolution: tuple[int, int],
-        crop_before_resize: bool=True,
-        allow_vertical: bool=False,
-        random_resize: dict[str, float]=None,
-        interpolation_mode=TVF.InterpolationMode.LANCZOS,
-    ) -> Callable[[list[Union[Image.Image, torch.Tensor]]], list[Image.Image]]:
-    """
-    Constructs a function to resize frames to the specified resolution.
-    """
-    return lambda frames: lean_resize_frames(
-        frames=frames,
-        resolution=resolution,
-        crop_before_resize=crop_before_resize,
-        allow_vertical=allow_vertical,
-        random_resize=random_resize,
-        interpolation_mode=interpolation_mode,
-    )
-
-#----------------------------------------------------------------------------
-# A video processing preset for joint audio/video decoding.
-
-def construct_joint_video_audio_decoding_callback():
-    pass
 
 #----------------------------------------------------------------------------

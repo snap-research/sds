@@ -5,9 +5,10 @@ They are structured as classes because they need to be pickleable for distribute
 """
 import io
 import json
-import torch
+import random
 from typing import Any
 
+import torch
 from beartype import beartype
 from PIL import Image
 
@@ -112,20 +113,72 @@ class ConvertVideoToByteTensorTransform(BaseTransform):
         sample[self.output_field] = torch.stack([SDF.convert_pil_image_to_byte_tensor(x) for x in sample[self.input_field]]) # [t, c, h, w]
         return sample
 
+@beartype
+class InitVideoDecoderTransform(BaseTransform):
+    """Initializes the video decoder with a video file."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=[self.input_field], absent=[])
+        sample[self.output_field] = SDF.init_video_decoder(sample[self.input_field])
+        return sample
+
+@beartype
+class DeleteVideoDecoderTransform(BaseTransform):
+    """Deletes the video decoder from the sample. We need a special transform for this to close the decoder manually."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=[self.input_field], absent=[])
+        sample[self.input_field].close()
+        del sample[self.input_field]
+        return sample
+
 #----------------------------------------------------------------------------
 # Label/text processing transforms.
 
+def is_dummy_field(d: dict, field: str) -> bool:
+    """Checks if a field is dummy: absent, None, or an empty string."""
+    return field not in d or d[field] is None or d[field] == ''
+
 @beartype
-class PickleLoaderTransform:
-    """Loads embeddings from a pickle file."""
-    def __init__(self, input_field: str, label_shape: tuple[int], output_field: str | None = None):
+class TextEmbsLoaderTransform:
+    """Loads text embeddings from a pickle file."""
+    def __init__(self, input_field: str, num_tokens: int, output_field: str | None = None, allow_missing: bool = False):
         self.input_field = input_field
         self.output_field = output_field if output_field is not None else input_field
-        self.label_shape = label_shape
+        self.num_tokens = num_tokens
+        self.allow_missing = allow_missing
 
     def __call__(self, sample: SampleData) -> SampleData:
-        _validate_fields(sample, present=[self.input_field], absent=[])
-        sample[self.output_field] = SDF.convert_pickle_embeddings_to_numpy(sample[self.input_field], self.label_shape)
+        if self.allow_missing and is_dummy_field(sample, self.input_field):
+            sample[self.output_field] = None
+        else:
+            _validate_fields(sample, present=[self.input_field], absent=[])
+            sample[self.output_field] = SDF.load_pickle_embeddings(sample[self.input_field], self.num_tokens)
+        return sample
+
+@beartype
+class TextEmbsSamplingTransform:
+    """Subsamples text embeddings from a sample."""
+    def __init__(self, input_fields: list[str], probabilities: list[float], output_field: str, cleanup: bool=True, allow_missing: bool=False):
+        assert len(input_fields) == len(probabilities), f"input_fields and probabilities must have the same length: {len(input_fields)} != {len(probabilities)}"
+        self.input_fields = input_fields
+        self.output_field = output_field
+        self.probabilities = probabilities
+        self.allow_missing = allow_missing
+        self.cleanup = cleanup
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=self.input_fields, absent=[])
+        assert self.allow_missing or all(not is_dummy_field(sample, f) for f in self.input_fields), \
+            f"Some input fields are missing: {self.input_fields} not found in sample with keys {list(sample.keys())}."
+        input_fields = [f for f in self.input_fields if not is_dummy_field(sample, f)]
+        weights = [p for p, f in zip(self.probabilities, self.input_fields) if not is_dummy_field(sample, f)]
+        assert len(input_fields) > 0, f"No valid input fields found in sample with keys {list(sample.keys())}."
+        selected_field = random.choices(input_fields, k=1, weights=weights)[0]
+        selected_text_embs = sample[selected_field]
+        if self.cleanup:
+            for field in self.input_fields:
+                del sample[field]
+        sample[self.output_field] = selected_text_embs
+
         return sample
 
 @beartype

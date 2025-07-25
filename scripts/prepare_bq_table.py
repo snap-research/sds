@@ -311,7 +311,7 @@ def prepare_config(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("config", type=str)
     args = parser.parse_args()
     configuration = load_yaml_config(args.config)
     configuration = prepare_config(configuration)
