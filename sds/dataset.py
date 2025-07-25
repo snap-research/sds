@@ -6,7 +6,6 @@ import base64
 from typing import Any, Iterator
 from collections import deque
 from collections.abc import Callable
-from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np

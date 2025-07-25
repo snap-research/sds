@@ -102,6 +102,15 @@ def is_non_empty_file(path: os.PathLike) -> bool:
     path = os.fspath(path)
     return os.path.isfile(path) and os.path.getsize(path) > 0
 
+def get_file_size(path: str) -> int:
+    """
+    Get the size of a file in bytes. If the file does not exist, returns 0.
+    """
+    path = os.fspath(path)
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    return 0
+
 #---------------------------------------------------------------------------
 # Uploading utils.
 

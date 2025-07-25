@@ -11,6 +11,7 @@ import pyarrow.parquet as pq
 import pandas as pd
 import polars as pl
 from loguru import logger
+from tqdm import tqdm
 
 from sds.utils.download import CloudDownloader
 from sds.structs import DataSampleType, DATA_TYPE_TO_EXT
@@ -83,8 +84,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
         # That's a special case: we receive a file containing a list of index paths, one per line.
         # Let's load it, read and distribute the data across ranks.
         dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, 'split_file_paths.txt')
-        with dist_utils.leader_first(local=True, skip_non_leaders=True):
-            CloudDownloader.get(src).direct_download(remote=src, local=dst)
+        CloudDownloader.get(src).direct_download(remote=src, local=dst)
         with open(dst, 'r') as f:
             index_files_list = [line.strip() for line in f if line.strip()]
         src_exts = {os_utils.file_ext(f).lower() for f in index_files_list}
@@ -107,15 +107,16 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
 
     # Now, we need to download them in parallel and save as a unified parquet file.
     dst_files_list = [os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(f)) for f in cur_node_files_list]
-    os_utils.parallel_download(cur_node_files_list, dst_files_list, skip_if_exists=True, num_workers=16)
+    os_utils.parallel_download(cur_node_files_list, dst_files_list, skip_if_exists=True, num_workers=16, verbose=True)
 
     # Now, we can concatenate the data from all the files into a single DataFrame.
-    # downloaded_filesfiles = glob.glob(os.path.join(dst_dir, RAW_INDEX_FILES_DIR, f'*{src_ext}'))
     reader = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': lambda *args, **kwargs: pq.read_table(*args, **kwargs).to_pandas()}[src_ext]
-    df = pd.concat((reader(f) for f in dst_files_list), ignore_index=True)
+    index_list_raw_size = sum([os_utils.get_file_size(f) for f in dst_files_list])
+    df = pd.concat((reader(f) for f in tqdm(dst_files_list, desc=f"Loading in memory {len(dst_files_list)} <index>{src_ext} files. Raw size: {index_list_raw_size:,} bytes.")), ignore_index=True)
     df = maybe_shuffle_df(df, shuffle_seed)
     df = maybe_slice_df(df, max_size, index_type)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
+    logger.debug(f"Saving the index to {index_dst} with {len(df):,} samples...")
     df.to_parquet(index_dst, index=False)
     index_meta = IndexMetaData(len(df), index_dst, index_type)  # Placeholder for the actual number of samples.
 
