@@ -138,7 +138,7 @@ def is_dummy_field(d: dict, field: str) -> bool:
     return field not in d or d[field] is None or d[field] == ''
 
 @beartype
-class TextEmbsLoaderTransform:
+class TextEmbLoaderTransform:
     """Loads text embeddings from a pickle file."""
     def __init__(self, input_field: str, num_tokens: int, output_field: str | None = None, allow_missing: bool = False):
         self.input_field = input_field
@@ -155,29 +155,38 @@ class TextEmbsLoaderTransform:
         return sample
 
 @beartype
-class TextEmbsSamplingTransform:
+class TextEmbSamplingTransform:
     """Subsamples text embeddings from a sample."""
-    def __init__(self, input_fields: list[str], probabilities: list[float], output_field: str, cleanup: bool=True, allow_missing: bool=False):
-        assert len(input_fields) == len(probabilities), f"input_fields and probabilities must have the same length: {len(input_fields)} != {len(probabilities)}"
-        self.input_fields = input_fields
-        self.output_field = output_field
+    def __init__(self, input_text_fields: list[str], input_text_emb_fields: list[str], probabilities: list[float], output_text_field: str, output_text_emb_field: str, cleanup: bool=True, allow_missing: bool=False):
+        assert len(input_text_fields) == len(input_text_emb_fields) == len(probabilities), \
+            f"Input fields, text embedding fields, and probabilities must have the same length: {len(input_text_fields)}, {len(input_text_emb_fields)}, {len(probabilities)}."
+        self.input_text_fields = input_text_fields
+        self.input_text_emb_fields = input_text_emb_fields
+        self.output_text_field = output_text_field
+        self.output_text_emb_field = output_text_emb_field
         self.probabilities = probabilities
         self.allow_missing = allow_missing
         self.cleanup = cleanup
 
     def __call__(self, sample: SampleData) -> SampleData:
-        _validate_fields(sample, present=self.input_fields, absent=[])
-        assert self.allow_missing or all(not is_dummy_field(sample, f) for f in self.input_fields), \
-            f"Some input fields are missing: {self.input_fields} not found in sample with keys {list(sample.keys())}."
-        input_fields = [f for f in self.input_fields if not is_dummy_field(sample, f)]
-        weights = [p for p, f in zip(self.probabilities, self.input_fields) if not is_dummy_field(sample, f)]
-        assert len(input_fields) > 0, f"No valid input fields found in sample with keys {list(sample.keys())}."
-        selected_field = random.choices(input_fields, k=1, weights=weights)[0]
-        selected_text_embs = sample[selected_field]
+        _validate_fields(sample, present=self.input_text_emb_fields, absent=[])
+        assert self.allow_missing or all(not is_dummy_field(sample, f) for f in self.input_text_emb_fields), \
+            f"Some input fields are missing: {self.input_text_emb_fields} not found in sample with keys {list(sample.keys())}."
+        input_text_emb_fields = [f for f in self.input_text_emb_fields if not is_dummy_field(sample, f)]
+        weights = [p for p, f in zip(self.probabilities, self.input_text_emb_fields) if f in input_text_emb_fields]
+        input_text_fields = [tf for tf, tef in zip(self.input_text_fields, self.input_text_emb_fields) if tef in input_text_emb_fields]
+        assert len(input_text_emb_fields) > 0, f"No valid input fields found in sample with keys {list(sample.keys())}."
+        assert len(input_text_emb_fields) == len(input_text_fields) == len(weights), \
+            f"Mismatch in lengths: input_text_emb_fields={len(input_text_emb_fields)}, input_text_fields={len(input_text_fields)}, weights={len(weights)}."
+        selected_index = random.choices(range(len(input_text_emb_fields)), k=1, weights=weights)[0]
+        selected_text_emb = sample[input_text_emb_fields[selected_index]]
+        selected_text = sample[input_text_fields[selected_index]]
         if self.cleanup:
-            for field in self.input_fields:
-                del sample[field]
-        sample[self.output_field] = selected_text_embs
+            for field in self.input_text_emb_fields + self.input_text_fields:
+                if field in sample:
+                    del sample[field]
+        sample[self.output_text_field] = selected_text
+        sample[self.output_text_emb_field] = selected_text_emb
 
         return sample
 
