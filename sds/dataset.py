@@ -3,6 +3,7 @@ import time
 import types
 import hashlib
 import base64
+import traceback
 from typing import Any, Iterator
 from collections import deque
 from collections.abc import Callable
@@ -47,6 +48,9 @@ class StreamingDataset(IterableDataset):
         max_size: int | None=None, # Cuts the amount of samples to this size, if specified. Useful for debugging or testing.
         resolution: Any=None, # TODO: dirty hack to support the genvid repo...
         allow_missing_columns: bool=False, # If True, ignore missing columns in the index file.
+        num_random_access_retries: int=5, # The number of retries to access a sample by its index.
+        print_exceptions: bool=False, # If True, print exceptions in the main thread.
+        print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
     ):
         _ = resolution # Unused, kept for compatibility with the genvid repo.
         self.name: str = name if name is not None else os_utils.file_key(src)
@@ -68,6 +72,11 @@ class StreamingDataset(IterableDataset):
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
         self._gc = os_utils.TimeBasedGarbageCollector(interval_seconds=30)
         self.allow_missing_columns = allow_missing_columns
+
+        # Random access parameters.
+        self._num_random_access_retries = num_random_access_retries
+        self._print_exceptions = print_exceptions
+        self._print_traceback = print_traceback
 
         assert self.index_col_name not in self.columns_to_download, f"Index column {self.index_col_name} cannot be in columns_to_download: {self.columns_to_download}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
@@ -134,7 +143,26 @@ class StreamingDataset(IterableDataset):
             raise RuntimeError("Index is not initialized. Call __iter__() first.")
         return len(self.index_slice)
 
-    def __getitem__(self, sample_id: int) -> dict[str, Any]:
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        return self._safe_get_item(idx, num_retries_left=self._num_random_access_retries)
+
+    def _safe_get_item(self, idx: int, num_retries_left: int=None) -> dict[str, Any]:
+        try:
+            return self._unsafe_get_item(idx)
+        except Exception as e: # pylint: disable=broad-except
+            if self._print_exceptions:
+                print(f"Exception in __getitem__({idx}): {e}")
+            if self._print_traceback:
+                traceback.print_exc()
+            num_retries_left = self._num_random_access_retries if num_retries_left is None else num_retries_left
+            if num_retries_left >= 0:
+                new_idx = np.random.RandomState(idx).randint(low=0, high=len(self))
+                return self._safe_get_item(idx=new_idx, num_retries_left=num_retries_left - 1)
+            else:
+                print(f"Failed to load the video even after {self._num_random_access_retries} retries. Something is broken.")
+                raise e
+
+    def _unsafe_get_item(self, sample_id: int) -> dict[str, Any]:
         """
         Get sample by global index, blocking to download it.
         Note that for an intra-node index, we can only get samples from the current node-level partition only.
