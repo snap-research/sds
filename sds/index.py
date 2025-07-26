@@ -73,7 +73,7 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, **kwargs) -> 
         return build_index_from_files_list(files_list, data_type=data_type, dst_dir=dst_dir, **kwargs)
 
 
-def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int, max_size: int=None) -> IndexMetaData:
+def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int, max_size: int=None, cols_to_keep: list[str] | None=None) -> IndexMetaData:
     """
     This function builds an index from either `split_file_paths.txt` list or wildcard path (e.g., 's3://bucket/path/*.csv').
     It's an intra-node index, meaning that each node will process its own subset of data.
@@ -114,7 +114,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     index_list_raw_size = sum([os_utils.get_file_size(f) for f in dst_files_list])
     df = pd.concat((reader(f) for f in tqdm(dst_files_list, desc=f"Loading in memory {len(dst_files_list)} <index>{src_ext} files. Raw size: {index_list_raw_size:,} bytes.")), ignore_index=True)
     df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type)
+    df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     logger.debug(f"Saving the index to {index_dst} with {len(df):,} samples...")
     df.to_parquet(index_dst, index=False)
@@ -123,7 +123,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     return index_meta
 
 
-def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, max_size: int=None) -> IndexMetaData:
+def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, max_size: int=None, cols_to_keep: list[str] | None=None) -> IndexMetaData:
     index_type = IndexType.INTER_NODE
     # We have just a single index file which contains all the data samples metadata.
     # First, download the file to the destination directory.
@@ -141,7 +141,7 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
         logger.debug(f"Converting the index file from PyArrow Table to pandas DataFrame...")
         df = df.to_pandas()
     df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type)
+    df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
     assert isinstance(df, pd.DataFrame), f"Expected a DataFrame, got {type(df)} from {src}."
 
     # Now, we can save it as a parquet file for easier slicing.
@@ -152,7 +152,7 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
     return IndexMetaData(len(df), index_dst, index_type)
 
 
-def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType, shuffle_seed: int=None, max_size: int=None) -> IndexMetaData:
+def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType, shuffle_seed: int=None, max_size: int=None, cols_to_keep: list[str] | None=None) -> IndexMetaData:
     index_type = IndexType.INTER_NODE
     main_files = [f for f in files_list if os_utils.file_ext(f).lower() in DATA_TYPE_TO_EXT[data_type]]
     assert len(main_files) > 0, f"Didnt find any {data_type} files (used extensions: {DATA_TYPE_TO_EXT[data_type]})."
@@ -175,7 +175,7 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
     INDEX_COL_NAME = 'index'
     df = pd.DataFrame.from_dict(data, orient='index').reset_index(names=INDEX_COL_NAME).sort_values(by=INDEX_COL_NAME)
     df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type)
+    df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     data_utils.save_polars_parquet(df, index_dst)
     index_meta = IndexMetaData(len(df), index_dst, index_type)
@@ -230,7 +230,7 @@ def maybe_shuffle_df(df: pd.DataFrame, shuffle_seed: int | None) -> pd.DataFrame
         df = df.sample(frac=1, replace=False, random_state=shuffle_seed)
     return df
 
-def maybe_slice_df(df: pd.DataFrame, max_size: int | None, index_type) -> pd.DataFrame:
+def maybe_slice_df(df: pd.DataFrame, max_size: int | None, index_type, cols_to_keep: list[str] | None=None) -> pd.DataFrame:
     """
     Slice the DataFrame to a maximum size if specified.
     """
@@ -239,6 +239,7 @@ def maybe_slice_df(df: pd.DataFrame, max_size: int | None, index_type) -> pd.Dat
     max_size = (max_size // dist_utils.get_num_nodes()) if index_type == IndexType.INTRA_NODE else max_size
     assert max_size > 0, f"Max size must be greater than 0, got {max_size}."
     df = df.head(max_size) if len(df) > max_size else df
+    df = df[cols_to_keep] if cols_to_keep is not None else df # Keep only the specified columns if provided.
     return df
 
 #---------------------------------------------------------------------------

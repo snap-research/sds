@@ -225,6 +225,18 @@ class OneHotEncodeTransform:
         sample[self.output_field] = SDF.one_hot_encode(sample[self.input_field], num_classes=self.num_classes)
         return sample
 
+@beartype
+class AddConstantFieldTransform:
+    """Adds a constant field to the sample."""
+    def __init__(self, output_field: str, value: Any):
+        self.output_field = output_field
+        self.value = value
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=[], absent=[self.output_field])
+        sample[self.output_field] = self.value
+        return sample
+
 #----------------------------------------------------------------------------
 # Misc data-processing transforms.
 

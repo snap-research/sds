@@ -51,6 +51,9 @@ class StreamingDataset(IterableDataset):
         num_random_access_retries: int=5, # The number of retries to access a sample by its index.
         print_exceptions: bool=False, # If True, print exceptions in the main thread.
         print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
+
+        # Some index optimization stuff.
+        index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
     ):
         _ = resolution # Unused, kept for compatibility with the genvid repo.
         self.name: str = name if name is not None else os_utils.file_key(src)
@@ -70,13 +73,16 @@ class StreamingDataset(IterableDataset):
         self._worker_cache_limit = None
         self._disk_usage = 0 # Current cache usage in bytes.
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
-        self._gc = os_utils.TimeBasedGarbageCollector(interval_seconds=30)
         self.allow_missing_columns = allow_missing_columns
 
         # Random access parameters.
         self._num_random_access_retries = num_random_access_retries
         self._print_exceptions = print_exceptions
         self._print_traceback = print_traceback
+
+        # Some optimization parameters.
+        self._gc = os_utils.TimeBasedGarbageCollector(interval_seconds=30)
+        self._index_cols_to_keep = index_cols_to_keep
 
         assert self.index_col_name not in self.columns_to_download, f"Index column {self.index_col_name} cannot be in columns_to_download: {self.columns_to_download}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
@@ -103,7 +109,7 @@ class StreamingDataset(IterableDataset):
         now = time.time()
         logger.debug('Building index...')
         if dist_utils.is_node_leader():
-            self.index_meta = build_index(self.src, self.dst, self.data_type, shuffle_seed=self.shuffle_seed, max_size=self._max_size)
+            self.index_meta = build_index(self.src, self.dst, self.data_type, shuffle_seed=self.shuffle_seed, max_size=self._max_size, cols_to_keep=self._index_cols_to_keep)
         else:
             self.index_meta = None
         dist_utils.maybe_barrier()
