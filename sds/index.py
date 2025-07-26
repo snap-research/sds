@@ -128,20 +128,25 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
     # We have just a single index file which contains all the data samples metadata.
     # First, download the file to the destination directory.
     dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(src))
+    logger.debug(f"Downloading the index file from {src} to {dst}...")
     assert os_utils.download_file(src, dst, skip_if_exists=True), f"Failed to download the index file from {src} to {dst}."
     assert os_utils.is_non_empty_file(dst), f"Failed to download the index file from {src} to {dst}."
 
     # Reading the file.
     src_ext = os_utils.file_ext(src).lower()
     reader = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': pq.read_table}[src_ext]
+    logger.debug(f"Reading the index file {dst} into memory... Size: {os_utils.get_file_size(dst):,} bytes.")
     df = reader(dst)
-    df = df.to_pandas() if isinstance(df, pa.Table) else df # Convert to pandas DataFrame if it's a PyArrow Table.
+    if isinstance(df, pa.Table): # Convert to pandas DataFrame if it's a PyArrow Table.
+        logger.debug(f"Converting the index file from PyArrow Table to pandas DataFrame...")
+        df = df.to_pandas()
     df = maybe_shuffle_df(df, shuffle_seed)
     df = maybe_slice_df(df, max_size, index_type)
     assert isinstance(df, pd.DataFrame), f"Expected a DataFrame, got {type(df)} from {src}."
 
     # Now, we can save it as a parquet file for easier slicing.
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
+    logger.debug(f"Saving the index to {index_dst} with {len(df):,} samples...")
     df.to_parquet(index_dst, index=False)
 
     return IndexMetaData(len(df), index_dst, index_type)
