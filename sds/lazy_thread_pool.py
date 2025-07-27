@@ -111,10 +111,10 @@ class LazyThreadPool:
         self.stop_event.set()
         self.pause_event.set()
 
-    def shutdown(self):
+    def shutdown(self, timeout: float=1.0):
         self.stop()
         for worker in self.workers:
-            worker.join(timeout=1)
+            worker.join(timeout=timeout)
 
     def clear_pending_tasks(self) -> int:
         """Clears all tasks from the queue that have not yet started executing."""
@@ -140,14 +140,15 @@ class LazyThreadPool:
         while not self.completed_queue.empty():
             try:
                 self.completed_queue.get_nowait()
+                self.completed_queue.task_done()
             except queue.Empty:
                 break
 
     def reset(self):
-        self.num_tasks_scheduled = 0
-        self.num_tasks_completed = 0
         self.clear_pending_tasks()
         self.drain_completed_tasks()
+        self.num_tasks_scheduled = 0
+        self.num_tasks_completed = 0
 
     def yield_completed(self) -> iter:
         """
@@ -161,6 +162,7 @@ class LazyThreadPool:
             # get() is a blocking call. It will wait here indefinitely until a
             # worker puts a result in the queue. It does NOT depend on timing.
             task_result = self.completed_queue.get()
+            self.completed_queue.task_done()
             num_yielded += 1
             self.num_tasks_completed += 1 if task_result['success'] else 0
 

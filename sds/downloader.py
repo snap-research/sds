@@ -108,6 +108,12 @@ class ParallelDownloader:
                 logger.error(f"Download failed: {result}")
                 self._clean_failed_download(result['task_input'])
 
+    def get_num_pending_tasks(self) -> int:
+        """
+        Returns the number of pending tasks in the thread pool.
+        """
+        return self.thread_pool.task_queue.qsize()
+
 #----------------------------------------------------------------------------
 
 def run_downloading_task(task: DownloadingTask) -> float:

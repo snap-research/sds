@@ -25,6 +25,8 @@ import sds.utils.os_utils as os_utils
 SAMPLE_DISK_USAGE_FIELD = '__disk_usage__' # The total size of the sample in bytes.
 PROCESSED_FIELD = '__is_processed__' # A flag to mark the sample as processed.
 SAMPLE_KEY_FIELD = '__sample_key__' # A key for the sample, corresponding to the index column value.
+SCHEDULE_BATCH_SIZE = 30_000 # The number of samples to schedule for download in one batch.
+MIN_NUM_PENDING_TASKS_THRESH = 5_000
 
 #---------------------------------------------------------------------------
 
@@ -95,10 +97,11 @@ class StreamingDataset(IterableDataset):
         self.build_index() # Build the index metadata. TODO: it's slow sometimes, so maybe we should to it lazily.
         self.index_slice = None # Index will be initialized in __iter__(), when we know the workers.
 
-        self._executor: ThreadPoolExecutor | None = None # A background thread to do call downloading/deletion to not block the main thread.
+        self.downloader = self.init_downloader() # Initialize the downloader to download the shards in parallel.
 
-        # A downloader to download the shards in parallel.
-        self.downloader = ParallelDownloader(
+    def init_downloader(self) -> ParallelDownloader:
+        """Initializes a downloader to download the shards in parallel."""
+        return ParallelDownloader(
             num_workers=self.num_downloading_workers,
             prefetch=self.prefetch,  # Prefetch a bit more than the number of workers.
             num_retries=self.num_downloading_retries,
@@ -157,7 +160,7 @@ class StreamingDataset(IterableDataset):
             return self._unsafe_get_item(idx)
         except Exception as e: # pylint: disable=broad-except
             if self._print_exceptions:
-                print(f"Exception in __getitem__({idx}): {e}")
+                logger.error(f"Exception in __getitem__({idx}): {e}")
             if self._print_traceback:
                 traceback.print_exc()
             num_retries_left = self._num_random_access_retries if num_retries_left is None else num_retries_left
@@ -165,7 +168,7 @@ class StreamingDataset(IterableDataset):
                 new_idx = np.random.RandomState(idx).randint(low=0, high=len(self))
                 return self._safe_get_item(idx=new_idx, num_retries_left=num_retries_left - 1)
             else:
-                print(f"Failed to load the video even after {self._num_random_access_retries} retries. Something is broken.")
+                logger.error(f"Failed to load the video even after {self._num_random_access_retries} retries. Something is broken.")
                 raise e
 
     def _unsafe_get_item(self, sample_id: int) -> dict[str, Any]:
@@ -200,17 +203,20 @@ class StreamingDataset(IterableDataset):
 
         return downloading_result # Return smth meaningful only for blocking calls.
 
-    def _schedule_downloads(self, sample_ids: list[int]) -> list[dict[str, Any]]:
-        processed_sample_metas: list[dict[str, Any]] = [None] * len(sample_ids)  # Preallocate a list to store processed sample metas.
-        for sample_id in sample_ids:
+    def _schedule_downloads_(self, sample_ids: list[int], processed_sample_ids: dict[int, dict], start_id: int, num_to_schedule: int) -> int:
+        num_to_schedule: int = min(num_to_schedule, len(sample_ids) - start_id)
+        num_scheduled: int = 0
+        for i in range(start_id, start_id + num_to_schedule):
+            sample_id = sample_ids[i]
             sample_meta: dict[str, Any] = self.index_slice.iloc[sample_id].to_dict()
             try:
                 self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=False)
+                num_scheduled += 1
             except Exception as e:
                 logger.error(f"Failed to schedule download for sample {sample_meta}: {e}")
-            processed_sample_metas[sample_id] = sample_meta  # Store the sample meta in the preallocated list.
-        logger.debug(f"Scheduled {len(processed_sample_metas)} samples for download with {self.downloader}.")
-        return processed_sample_metas
+            processed_sample_ids[sample_id] = sample_meta  # Store the sample meta in the preallocated list.
+        logger.debug(f"Scheduled {num_scheduled} samples for download with {self.downloader}.")
+        return num_scheduled
 
     def _construct_samples(self, sample_meta: dict[str, Any]) -> Iterator[SampleData]:
         # Loads all the binary files from the sample_meta.
@@ -229,8 +235,10 @@ class StreamingDataset(IterableDataset):
             try:
                 assert len(self._stored_sample_ids) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._worker_cache_limit}."
                 sample_id = self._stored_sample_ids.popleft() # Get the oldest sample key to evict.
+                assert sample_id in processed_sample_metas, f"Sample ID {sample_id} not found in processed_sample_metas."
                 self._delete_sample_from_disk(processed_sample_metas[sample_id])
                 self._disk_usage -= processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD]
+                del processed_sample_metas[sample_id]  # Remove the sample from the processed samples.
                 logger.debug(f"Current disk usage: {self._disk_usage} bytes, cache limit: {self._worker_cache_limit} bytes.")
             except Exception as e:
                 logger.error(f"Failed to evict sample: {e}")
@@ -262,6 +270,8 @@ class StreamingDataset(IterableDataset):
             self.downloader.init_thread_pool()
         else:
             self.downloader.reset()
+            self.downloader.stop() # Shutting down the previous downloader in an async way for its workers to finish and die.
+            self.downloader = self.init_downloader()  # Reinitialize the downloader to reset its state.
             # TODO: this looks like a bug.
             self._disk_usage = 0
             self._stored_sample_ids.clear()
@@ -281,9 +291,10 @@ class StreamingDataset(IterableDataset):
             cur_seed = (self.shuffle_seed * 1_000_003 + self.epoch * 1_000_037 + dl_worker_rank * 1_000_039) % (2**32)
             sample_ids = np.random.RandomState(cur_seed).permutation(sample_ids).tolist()
 
-        # worker_sample_id_offset = dl_worker_rank * (len(sample_ids) // dl_num_workers)
-        # sample_ids = sample_ids[worker_sample_id_offset:]
-        processed_sample_metas: list[dict[str, Any]] = self._schedule_downloads(sample_ids)
+        start_sample_id: int = 0
+        processed_sample_metas: dict[dict[str, Any]] = {}
+        self._schedule_downloads_(sample_ids, processed_sample_metas, start_id=start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
+        start_sample_id += SCHEDULE_BATCH_SIZE
 
         for sample_id, total_size in self.downloader.yield_completed_keys():
             processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD] = total_size
@@ -297,6 +308,12 @@ class StreamingDataset(IterableDataset):
             self._maybe_evict_cold_samples(processed_sample_metas)
             self._gc.maybe_collect()
             self.num_yielded_samples += 1
+
+            if start_sample_id < len(sample_ids) and self.downloader.get_num_pending_tasks() < MIN_NUM_PENDING_TASKS_THRESH:
+                # If we have less than MIN_NUM_PENDING_TASKS_THRESH pending tasks, schedule more.
+                self._schedule_downloads_(sample_ids, processed_sample_metas, start_id=start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
+                start_sample_id += SCHEDULE_BATCH_SIZE
+
         logger.debug(f"Yielded {self.num_yielded_samples} samples in epoch {self.epoch}.")
 
 #----------------------------------------------------------------------------
