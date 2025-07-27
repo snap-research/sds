@@ -279,9 +279,7 @@ class StreamingDataset(IterableDataset):
         dl_worker_rank, dl_num_workers = dist_utils.get_global_worker_info()
         self._maybe_init_worker_cache_limit(dl_worker_rank, dl_num_workers)
         if self.index_slice is None:
-            logger.debug(f"Loading index slice for worker {dl_worker_rank} with {dl_num_workers} workers.")
             self.index_slice = load_index_slice(self.index_meta, dl_worker_rank, dl_num_workers, dist_utils.get_num_nodes())
-            logger.debug(f"Loaded index slice for worker {dl_worker_rank}: {self.index_slice.shape} rows, {self.index_slice.shape[1]} columns.")
         self.epoch += 1 # TODO: this would be incrementing the epoch each time a new dataloader is called over the dataset, which is not good.
 
         # Creating a list of sample IDs to iterate over. Assuming that they will fit in memory.

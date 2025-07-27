@@ -2,6 +2,7 @@
 Some functions which help to build the index of src paths/urls for a dataset.
 """
 import os
+import time
 from dataclasses import dataclass
 from enum import Enum
 
@@ -187,12 +188,12 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
 
 def load_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int) -> pd.DataFrame:
     assert index_meta.path.endswith('.parquet'), f"Index file must be a parquet file. Found: {index_meta.path}"
+    start_time = time.time()
     start_idx, num_samples_per_rank = compute_index_slice(index_meta, rank, num_ranks, num_nodes)
     logger.debug(f"Loading index slice for rank {rank} (start_idx={start_idx}, num_samples_per_rank={num_samples_per_rank}) from {index_meta.path}")
-    # TODO: polars gets stuck at a deadlock and (as per gemini), pq loads the whole file into memory.
-    # return pl.scan_parquet(index_meta.path).slice(offset=start_idx, length=num_samples_per_rank).collect().to_pandas()
-    # return pq.read_table(path).slice(start_idx, num_samples_per_rank).to_pandas()
-    return data_utils.read_parquet_slice(index_meta.path, start_idx, num_samples_per_rank)
+    index_slice = data_utils.read_parquet_slice(index_meta.path, start_idx, num_samples_per_rank)
+    logger.debug(f"Loaded index slice for rank {rank} with {len(index_slice):,} samples. Time taken: {time.time() - start_time:.2f} seconds.")
+    return index_slice
 
 
 def load_index_row(index_meta: IndexMetaData, idx: int) -> pd.DataFrame:
