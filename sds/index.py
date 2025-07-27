@@ -117,7 +117,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     logger.debug(f"Saving the index to {index_dst} with {len(df):,} samples...")
-    df.to_parquet(index_dst, index=False)
+    data_utils.save_polars_parquet(df, index_dst)
     index_meta = IndexMetaData(len(df), index_dst, index_type)  # Placeholder for the actual number of samples.
 
     return index_meta
@@ -147,7 +147,7 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
     # Now, we can save it as a parquet file for easier slicing.
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     logger.debug(f"Saving the index to {index_dst} with {len(df):,} samples...")
-    df.to_parquet(index_dst, index=False)
+    data_utils.save_polars_parquet(df, index_dst)
 
     return IndexMetaData(len(df), index_dst, index_type)
 
