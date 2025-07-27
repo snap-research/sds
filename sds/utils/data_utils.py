@@ -1,65 +1,33 @@
 import os
-from pyarrow import fs
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import polars as pl
 
 #---------------------------------------------------------------------------
 
-def read_parquet_slice(path: str, N: int, K: int, region: str = None) -> pa.Table:
+def read_parquet_slice(path: str, N: int, K: int) -> pd.DataFrame:
     """
-    Load a row slice [N:N+K] from a directory of Parquet files (local or S3).
+    Efficiently load a row slice [N:N+K] from a directory of Parquet files using Polars.
 
     Args:
         path: Local path or 's3://...' S3 URI
         N: Start row index (inclusive)
         K: Number of rows to load
-        region: AWS region if reading from S3
 
     Returns:
-        pyarrow.Table with the requested row slice
+        polars.DataFrame with the requested row slice
     """
-    is_s3 = path.startswith("s3://")
+    # Polars can read from local or S3 paths directly
+    # Ensure `s3fs` and `pyarrow` are installed for S3 access.
 
-    if is_s3:
-        # Strip scheme and set up pyarrow S3FileSystem
-        stripped_path = path.replace("s3://", "")
-        fsys = fs.S3FileSystem(region=region)
-        dataset = pq.ParquetDataset(stripped_path, filesystem=fsys)
-    else:
-        fsys = fs.LocalFileSystem()
-        dataset = pq.ParquetDataset(path, filesystem=fsys)
+    lazy_df = pl.scan_parquet(path)
 
-    start = N
-    end = N + K
-    rows_accum = 0
-    batches = []
+    sliced_df = (
+        lazy_df
+        .slice(offset=N, length=K)
+        .collect(streaming=True)
+    )
 
-    for fragment in dataset.fragments:
-        metadata = fragment.metadata
-        num_rows = metadata.num_rows if metadata else fragment.physical_schema.num_rows
-
-        if rows_accum + num_rows < start:
-            rows_accum += num_rows
-            continue
-        if rows_accum >= end:
-            break
-
-        local_start = max(0, start - rows_accum)
-        local_end = min(num_rows, end - rows_accum)
-
-        table = fragment.to_table().slice(local_start, local_end - local_start)
-        batches.append(table)
-
-        rows_accum += num_rows
-        if rows_accum >= end:
-            break
-
-    result_table = pa.concat_tables(batches) if batches else pa.table({})
-    df = result_table.to_pandas()
-
-    return df
+    return sliced_df.to_pandas()
 
 
 def save_polars_parquet(df: pd.DataFrame, dst: str, group_size: int = 100_000):
