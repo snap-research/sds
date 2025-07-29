@@ -141,6 +141,7 @@ def decode_frames_from_video(
         frame_seek_timeout_sec: float=5.0,
         allow_shorter_videos: bool=False,
         framerate: float | None = None,
+        thread_type: str | None = None,
     ) -> list[Image.Image]:
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
@@ -149,7 +150,7 @@ def decode_frames_from_video(
     if video_decoder is None:
         assert video_file is not None, "Video bytes must be provided if no video decoder is specified."
         assert isinstance(video_file, bytes) or os_utils.file_ext(video_file) in VIDEO_EXT, f"Unsupported video file type: {video_file}. Supported types: {VIDEO_EXT}."
-        video_decoder = VideoDecoder(file=video_file)
+        video_decoder = VideoDecoder(file=video_file, default_thread_type=thread_type)
         should_close_decoder = True # We should close it since it's us who opened it.
     if num_frames_total is None:
         num_frames_total = video_decoder.video_stream.frames # Relying on a guessed amount of frames in the video stream.
