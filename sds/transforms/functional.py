@@ -132,7 +132,7 @@ def _apply_crop(x: Image.Image | torch.Tensor, crop: tuple[int, int, int, int]) 
         return x[:, crop[1]:crop[3], crop[0]:crop[2]]
 
 @beartype
-def decode_frames_from_video(
+def decode_video(
         video_file: bytes | str | None=None,
         num_frames_to_extract: int=1,
         num_frames_total: int | None=None,
@@ -142,7 +142,8 @@ def decode_frames_from_video(
         allow_shorter_videos: bool=False,
         framerate: float | None = None,
         thread_type: str | None = None,
-    ) -> list[Image.Image]:
+        return_audio: bool = False,
+    ) -> tuple[list[Image.Image], float, NDArray | None, int | None]:
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
     """
@@ -159,24 +160,83 @@ def decode_frames_from_video(
     target_framerate = base_framerate if framerate is None else framerate
 
     num_frames_to_extract = min(num_frames_total, num_frames_to_extract) if allow_shorter_videos else num_frames_to_extract
-    clip_duration_to_extract = num_frames_to_extract / target_framerate
-    video_duration = num_frames_total / base_framerate
-    assert video_duration >= clip_duration_to_extract or allow_shorter_videos, \
-        f"Video duration {video_duration} is shorter than the requested clip duration {clip_duration_to_extract} while allow_shorter_videos={allow_shorter_videos}."
-    start_frame_timestamp = np.random.rand() * max(video_duration - clip_duration_to_extract, 0.0) if random_offset else 0.0
-    frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration_to_extract, num_frames_to_extract,)
-    frame_timestamps = [t for t in frame_timestamps if t <= video_duration] # Filter out timestamps that are beyond the video duration.
+    clip_duration = num_frames_to_extract / target_framerate
+    full_video_duration = num_frames_total / base_framerate
+    assert full_video_duration >= clip_duration or allow_shorter_videos, \
+        f"Video duration {full_video_duration} is shorter than the requested clip duration {clip_duration} while allow_shorter_videos={allow_shorter_videos}."
+    start_frame_timestamp = np.random.rand() * max(full_video_duration - clip_duration, 0.0) if random_offset else 0.0
+    frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration, num_frames_to_extract,)
+    frame_timestamps = [t for t in frame_timestamps if t <= full_video_duration] # Filter out timestamps that are beyond the video duration.
     frames = video_decoder.decode_frames_at_times(frame_timestamps, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)
+
+    if return_audio:
+        waveform, sampling_rate = decode_audio_from_video_decoder(video_decoder, start_ts=start_frame_timestamp, end_ts=start_frame_timestamp + clip_duration)
+    else:
+        waveform = sampling_rate = None
 
     if should_close_decoder:
         video_decoder.close()
 
-    return frames
+    return frames, clip_duration, waveform, sampling_rate
 
 #----------------------------------------------------------------------------
 # Audio processing functions.
 
-# TODO.
+def decode_audio_from_video_decoder(video_decoder: VideoDecoder, start_ts: float, end_ts: float | None = None) -> tuple[NDArray, int]:
+    audio_stream = next(s for s in video_decoder.container.streams if s.type == 'audio')
+    time_base = audio_stream.time_base
+
+    # compute presentation timestamp
+    start_pts = int(start_ts / time_base)
+
+    end_pts = None
+    if end_ts is not None:
+        end_pts = int(end_ts / time_base)
+
+    # Any frame disable seeking key frames which can be slower
+    video_decoder.container.seek(start_pts, stream=audio_stream, any_frame=False)
+
+    # Decode audio frames and convert to numpy
+    audio_frames = []
+    for frame in video_decoder.container.decode(audio_stream):
+        if frame.pts < start_pts:
+            continue
+        if end_pts is not None and frame.pts > end_pts:
+            break
+
+        frame_np = frame.to_ndarray() # [n_channels, T_i]
+        frame_np = frame_np[None, :] if len(frame_np.shape) == 1 else frame_np  # Ensure it's 2D [n_channels, T_i]
+        audio_frames.append(frame_np)
+
+    if audio_frames:
+        waveform = np.concatenate(audio_frames, axis=1) # [n_channels, T_1 + T_2 + ... + T_n]
+    else:
+        waveform = np.zeros((1, 0), dtype=np.float32)  # No audio frames decoded, return empty waveform
+
+    return waveform, audio_stream.rate
+
+@beartype
+def resample_waveform(waveform: torch.Tensor, **resampling_kwargs) -> torch.Tensor:
+    assert torchaudio is not None, "torchaudio is not available. Please install it to use audio resampling."
+    return torchaudio.functional.resample(waveform, **resampling_kwargs)
+
+@beartype
+def resize_waveform(waveform: torch.Tensor, target_length: int, mode: str='pad_or_trim') -> torch.Tensor:
+    """
+    Pads or trims the waveform to the target length.
+    TODO: should we do interpolation?
+    """
+    assert mode in ['pad_or_trim'], f"Unsupported mode: {mode}. Supported modes: ['pad_or_trim']."
+    assert waveform.ndim == 2, f"Waveform must be 2D, got shape {waveform.shape}."
+    if waveform.shape[1] == target_length:
+        return waveform
+    elif waveform.shape[1] < target_length:
+        # Pad the waveform to the target length
+        padding = target_length - waveform.shape[1]
+        return torch.nn.functional.pad(waveform, (0, padding), mode='constant', value=0.0)
+    else:
+        # Trim the waveform to the target length
+        return waveform[:, :target_length]
 
 #----------------------------------------------------------------------------
 # Miscellaneous transforms.

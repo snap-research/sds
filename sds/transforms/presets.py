@@ -3,11 +3,11 @@ Transform presets for common data processing tasks in the SDS framework.
 They are structured as classes because they need to be pickleable for distributed processing
 (otherwise, torch.data.utils.DataLoader will fail to pickle them for num_workers > 0).
 """
-import io
 import json
 import random
 from typing import Any
 
+import numpy as np
 import torch
 from beartype import beartype
 from PIL import Image
@@ -94,7 +94,8 @@ class DecodeVideoTransform(BaseTransform):
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[])
-        sample[self.output_field] = SDF.decode_frames_from_video(video_file=sample[self.input_field], num_frames_to_extract=self.num_frames, **self.decode_kwargs)
+        sample[self.output_field], _clip_duration, _waveform, _audio_sr = SDF.decode_video(
+            video_file=sample[self.input_field], num_frames_to_extract=self.num_frames, **self.decode_kwargs)
         return sample
 
 @beartype
@@ -128,6 +129,76 @@ class DeleteVideoDecoderTransform(BaseTransform):
         _validate_fields(sample, present=[self.input_field], absent=[])
         sample[self.input_field].close()
         del sample[self.input_field]
+        return sample
+
+#----------------------------------------------------------------------------
+# Audio processing transforms.
+
+@beartype
+class ConvertAudioToFloatTensorTransform(BaseTransform):
+    """Converts an audio file to a torch tensor."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: np.ndarray}, absent=[])
+        sample[self.output_field] = torch.from_numpy(sample[self.input_field]).float() # [c, t]
+        return sample
+
+@beartype
+class AverageAudioTransform(BaseTransform):
+    """Averages audio data across channels."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: torch.Tensor}, absent=[])
+        if sample[self.input_field].ndim == 1:
+            # Mono audio, no need to average
+            sample[self.output_field] = sample[self.input_field]
+        else:
+            # Multi-channel audio, average across channels
+            sample[self.output_field] = sample[self.input_field].mean(dim=0, keepdim=True)  # [1, t] for mono audio
+        return sample
+
+@beartype
+class ResizeAudioTransform(BaseTransform):
+    """Resizes the audio by resampling it and then trimming or padding it to a specified duration."""
+    def __init__(self, audio_input_field: str, original_sr_input_field: str, clip_duration_input_field: str, target_audio_sr: int, output_field: str | None = None, **resampling_kwargs):
+        self.audio_input_field = audio_input_field
+        self.original_sr_input_field = original_sr_input_field
+        self.clip_duration_input_field = clip_duration_input_field
+        self.output_field = output_field if output_field is not None else audio_input_field
+        self.target_audio_sr = target_audio_sr
+        self.resampling_kwargs = resampling_kwargs
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.audio_input_field: torch.Tensor, self.clip_duration_input_field: float, self.original_sr_input_field: int}, absent=[])
+        waveform = SDF.resample_waveform(waveform=sample[self.audio_input_field], orig_freq=sample[self.original_sr_input_field], new_freq=self.target_audio_sr, **self.resampling_kwargs)
+        waveform = SDF.resize_waveform(waveform, target_length=int(self.target_audio_sr * sample[self.clip_duration_input_field]))
+        sample[self.output_field] = waveform
+        return sample
+
+#----------------------------------------------------------------------------
+# Multi-modal transforms.
+
+@beartype
+class DecodeVideoAndAudioTransform(BaseTransform):
+    """Decodes a video file and extracts both video and audio, returning both as tensors."""
+    def __init__(
+            self, input_field: str, video_output_field: str, original_clip_duration_output_field: str,
+            audio_output_field: str, original_sr_output_field: str, num_frames: int, **decode_kwargs
+        ):
+        self.input_field = input_field
+        self.video_output_field = video_output_field
+        self.original_clip_duration_output_field = original_clip_duration_output_field
+        self.audio_output_field = audio_output_field
+        self.original_sr_output_field = original_sr_output_field
+        self.num_frames = num_frames
+        self.decode_kwargs = decode_kwargs
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=[self.input_field], absent=[self.audio_output_field, self.original_sr_output_field])
+        video_data, clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
+            sample[self.input_field], num_frames_to_extract=self.num_frames, **self.decode_kwargs, return_audio=True)
+        sample[self.video_output_field] = video_data
+        sample[self.original_clip_duration_output_field] = clip_duration
+        sample[self.audio_output_field] = waveform_data
+        sample[self.original_sr_output_field] = waveform_sampling_rate
         return sample
 
 #----------------------------------------------------------------------------
@@ -358,7 +429,6 @@ def create_standard_metadata_pipeline(
 
     return transforms
 
-# Note: These pipelines can now be built using the class-based transforms above.
 @beartype
 def create_standard_video_pipeline(
     video_field: str,
@@ -375,6 +445,44 @@ def create_standard_video_pipeline(
         ResizeVideoTransform(input_field='video', **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field='video'),
     ]
+
+    return transforms
+
+@beartype
+def create_standard_joint_video_audio_pipeline(
+    video_field: str,
+    num_frames: int,
+    decode_kwargs={}, # Extra decoding parameters for DecodeAudioFromVideoTransform
+    mono_audio: bool = True,
+    target_audio_sr: int = 16000, # Audio sampling rate
+    **resize_kwargs,
+):
+    """
+    Creates a standard joint audio/video dataloading transform, which loads and decodes a video and audio together.
+    """
+    transforms: list[SampleTransform] = [
+        RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
+        DecodeVideoAndAudioTransform(
+            input_field='video',
+            video_output_field='video',
+            original_clip_duration_output_field='original_clip_duration',
+            audio_output_field='audio',
+            original_sr_output_field='original_audio_sampling_rate',
+            num_frames=num_frames,
+            **decode_kwargs
+        ),
+        ResizeVideoTransform(input_field='video', **resize_kwargs),
+        ConvertVideoToByteTensorTransform(input_field='video'),
+        ConvertAudioToFloatTensorTransform(input_field='audio'),
+        ResizeAudioTransform(
+            audio_input_field='audio',
+            clip_duration_input_field='original_clip_duration',
+            original_sr_input_field='original_audio_sampling_rate',
+            target_audio_sr=target_audio_sr,
+        ),
+    ]
+    if mono_audio:
+        transforms.append(AverageAudioTransform(input_field='audio'))
 
     return transforms
 
