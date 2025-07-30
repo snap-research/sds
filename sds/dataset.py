@@ -231,6 +231,7 @@ class StreamingDataset(IterableDataset):
 
     def _maybe_evict_cold_samples(self, processed_sample_metas: dict[str, Any]):
         assert self._worker_cache_limit is not None, "Worker cache limit must be set before eviction."
+        num_failures = 0
         while self._disk_usage > self._worker_cache_limit:
             try:
                 assert len(self._stored_sample_ids) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._worker_cache_limit}."
@@ -242,7 +243,9 @@ class StreamingDataset(IterableDataset):
                 logger.debug(f"Current disk usage: {self._disk_usage} bytes, cache limit: {self._worker_cache_limit} bytes.")
             except Exception as e:
                 logger.error(f"Failed to evict sample: {e}")
-                break
+                num_failures += 1
+                if num_failures > 100:
+                    break # There is something wrong with the eviction process, stop it to avoid infinite loop.
 
     def _maybe_init_worker_cache_limit(self, global_worker_rank: int, global_num_workers: int) -> None:
         if self._worker_cache_limit is not None:
