@@ -1,14 +1,7 @@
-import os
 import math
-import warnings
-import logging
-import datetime
-from contextlib import contextmanager
-from typing import Any
 
-from loguru import logger
+import numpy as np
 from beartype import beartype
-import torch
 
 #----------------------------------------------------------------------------
 # Shuffling utils.
@@ -39,5 +32,24 @@ def coprime_seed(seed: int, N: int) -> int:
     while math.gcd(a, N) != 1:
         a += 2
     return a % N
+
+@beartype
+def probabilities_to_counts(probabilities: list[float] | np.ndarray, min_count: int = 1) -> list[int]:
+    """
+    Converts a list of probabilities to counts, ensuring that each count is at least `min_count`.
+    The sum of the counts will be equal to the sum of the probabilities multiplied by the total number of samples.
+    """
+    assert all(p >= 0 for p in probabilities), "Probabilities must be non-negative."
+    total_prob = sum(probabilities)
+    if total_prob == 0:
+        return [min_count] * len(probabilities)
+
+    probabilities = np.array(probabilities)
+    counts = probabilities / min([p for p in probabilities if p > 0])  # Normalize to avoid division by zero.
+    counts = np.round(counts).astype(int)
+    counts[counts < min_count] = min_count
+    counts[probabilities == 0] = 0
+
+    return counts.tolist()
 
 #----------------------------------------------------------------------------
