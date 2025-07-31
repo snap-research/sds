@@ -240,7 +240,6 @@ class StreamingDataset(IterableDataset):
                 self._delete_sample_from_disk(processed_sample_metas[sample_id])
                 self._disk_usage -= processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD]
                 del processed_sample_metas[sample_id]  # Remove the sample from the processed samples.
-                logger.debug(f"Current disk usage: {self._disk_usage} bytes, cache limit: {self._worker_cache_limit} bytes.")
             except Exception as e:
                 logger.error(f"Failed to evict sample: {e}")
                 num_failures += 1
@@ -263,7 +262,6 @@ class StreamingDataset(IterableDataset):
                 file_path = sample_meta[col]
                 assert os.path.exists(file_path), f"File {file_path} does not exist."
                 os.remove(file_path)
-                logger.debug(f"Deleted file {file_path} for sample {sample_meta[self.index_col_name]}.")
             except Exception as e:
                 logger.error(f"Failed to delete file {file_path} for sample {sample_meta[self.index_col_name]}: {e}")
                 if self._print_exceptions:
