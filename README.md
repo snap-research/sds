@@ -1,4 +1,4 @@
-## Streaming Dataset for the People
+## Streaming Dataset V2
 
 A streaming dataset which fetches and yields samples on the fly, witch caching/eviction and random access. Features:
 - *Very* flexible in terms of data sources:
@@ -87,16 +87,17 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 8. Caching and eviction logic is performed by the StreamingDataset class, which keeps track of downloaded file sizes and evicts the oldest ones when the cache size exceeds the threshold. Currently, the cache size is set naively per workers as `node_cache_size / num_workers`, assuming that each worker has equal load.
 
 ## Contributing
-### TODOs
+
+### Current TODOs
 - [x] Index construction
-- [ ] Dataset iterator
+- [x] Dataset iterator
 - [x] Shuffling each epoch
 - [ ] Lazy index so that we can efficiently initialize large datasets on a single node without hitting disk space limits
 - [x] Cache data + evict cold samples
 - [x] Video decoding
 - [ ] Audio loading
 - [ ] Tutorial/usage examples
-- [ ] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
+- [x] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
 - [ ] More test coverage
 - [ ] Documentation
 - [x] Support for data provides as callbacks (possibly via forward/backward translation)
@@ -116,6 +117,9 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Sometimes, we can have less raw index files that nodes.
 - [x] Missing fields should be populated in the dataloader or index meta or where? (I guess, they should automatically be filled with `None` in the index).
 
+### TODOs for V2.5
+- [ ] SQLite index instead of parquet.
+- [ ] Move synchronous batch-wise yielding to the `StreamingDataset` class using the round-robin assumption of torch dataloader iterating over workers.
 
 ### Running tests
 ```bash
