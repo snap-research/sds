@@ -11,6 +11,7 @@ from sds.utils import misc
 #----------------------------------------------------------------------------
 
 STREAM_NAME_BATCH_KEY = '__stream_name__'
+GRAD_ACC_STEPS_KEY = '__num_grad_acc_steps_left__'
 
 #----------------------------------------------------------------------------
 # Helper enums and structs.
@@ -38,6 +39,7 @@ class StreamConfig:
     is_main: bool = False
     kwargs: dict[str, Any] = field(default_factory=dict)
     name: str | None = None
+    grad_accum: int = 1 # The amount of gradient accumulation steps for this stream.
 
 #----------------------------------------------------------------------------
 
@@ -100,13 +102,18 @@ class MultiStreamDataLoader:
             elif state is not None:
                 raise ValueError("Stream dataset does not support loading state dict.")
 
-    def _post_process_batch(self, batch: dict[str, Any], stream_idx: int) -> dict[str, Any]:
-        f"""Adds a special {STREAM_NAME_BATCH_KEY} key to each element in the batch."""
+    def _yield_batches_from_stream(self, stream_idx: int) -> Iterator[dict[str, Any]]:
+        f"""Adds special {STREAM_NAME_BATCH_KEY} and {GRAD_ACC_STEPS_KEY} keys to each element in the batch."""
         # TODO: we assume that the batch is a dict and has already been collated.
-        batch_size = len(next(iter(batch.values())))
-        stream_name = self.stream_configs[stream_idx].name or f'stream_{stream_idx:03d}'
-        batch[STREAM_NAME_BATCH_KEY] = [stream_name] * batch_size
-        return batch
+        num_grad_acc_steps_left = self.stream_configs[stream_idx].grad_accum
+        while num_grad_acc_steps_left > 0:
+            batch = next(self.streams[stream_idx])
+            assert isinstance(batch, dict), f"Expected batch to be a dict, but got {type(batch)}. Make sure the dataset collates batches into a dict."
+            num_grad_acc_steps_left -= 1
+            stream_name = self.stream_configs[stream_idx].name or f'stream_{stream_idx:03d}'
+            batch[STREAM_NAME_BATCH_KEY] = stream_name
+            batch[GRAD_ACC_STEPS_KEY] = num_grad_acc_steps_left
+            yield batch
 
     def __iter__(self) -> Any:
         num_batches_yielded = 0
@@ -117,11 +124,11 @@ class MultiStreamDataLoader:
                 if self.schedule == ScheduleType.SHUFFLED_ROUND_ROBIN:
                     np.random.RandomState(num_batches_yielded + self.shuffle_seed).shuffle(cur_plan)
                 for stream_idx in cur_plan:
-                    yield self._post_process_batch(next(self.streams[stream_idx]), stream_idx)
+                    yield from self._yield_batches_from_stream(stream_idx)
                     num_batches_yielded += 1
             elif self.schedule == ScheduleType.RANDOM:
                 stream_idx = np.random.RandomState(num_batches_yielded + self.shuffle_seed).choice(len(self.streams), p=self.probabilities)
-                yield self._post_process_batch(next(self.streams[stream_idx]), stream_idx)
+                yield self._yield_batches_from_stream(stream_idx)
                 num_batches_yielded += 1
             else:
                 raise ValueError(f"Unsupported schedule: {self.schedule}. Supported schedules are 'random', 'round_robin', and 'shuffled_round_robin'.")
