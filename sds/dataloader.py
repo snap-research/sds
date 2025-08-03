@@ -115,7 +115,8 @@ class MultiStreamDataLoader:
 
         self.streams = []
         for i, cfg in enumerate(stream_configs):
-            dataloader = torch.utils.data.DataLoader(dataset=cfg.dataset, **cfg.dataloader_kwargs, **common_dataloader_kwargs, num_workers=worker_counts[i])
+            kwargs = {**common_dataloader_kwargs, **cfg.dataloader_kwargs}
+            dataloader = torch.utils.data.DataLoader(dataset=cfg.dataset, num_workers=worker_counts[i], **kwargs)
             self.streams.append(Stream(dataset=cfg.dataset, iterator=inf_loop_dataloader(dataloader), dataloader=dataloader, config=cfg))
         self._main_stream_idx = next(i for i, cfg in enumerate(stream_configs) if cfg.is_main) if any(cfg.is_main for cfg in stream_configs) else np.argmax(self.ratios)
 

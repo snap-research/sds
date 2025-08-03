@@ -1,4 +1,4 @@
-## Streaming Dataset V2
+## Streaming Dataset for the People
 
 A streaming dataset which fetches and yields samples on the fly, witch caching/eviction and random access. Features:
 - *Very* flexible in terms of data sources:
@@ -7,6 +7,8 @@ A streaming dataset which fetches and yields samples on the fly, witch caching/e
 - Has caching and eviction logic, so that you can efficiently work with large datasets without hitting disk space limits.
 - Has standard data processing transforms for images, videos, audios, text, and metadata.
 - Supports random access (through blocking calls)!
+
+Based on: [snap-datastream](https://github.sc-corp.net/Snapchat/snap-datastream)
 
 ## Installation
 
