@@ -256,4 +256,5 @@ def bytes_to_int(bytes_str: int | str) -> int:
             raise ValueError(''.join([
                 f'Unsupported value/suffix {bytes_str}. Supported suffix are {supported_suffix}.',
             ]))
+
 #---------------------------------------------------------------------------

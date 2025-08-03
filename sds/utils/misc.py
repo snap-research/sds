@@ -52,4 +52,17 @@ def probabilities_to_counts(probabilities: list[float] | np.ndarray, min_count: 
 
     return counts.tolist()
 
+@beartype
+def normalize_ratios(ratios: list[float | int | None]) -> np.ndarray:
+    if any(r is None for r in ratios):
+        assert all(r is None for r in ratios), f"All ratios must be None or all must be specified. Got: {ratios}"
+        ratios = [1.0] * len(ratios)
+
+    ratios = np.array(ratios, dtype=float)
+    assert ratios.min() >= 0, f"Ratios must be non-negative. Got: {ratios}"
+    assert ratios.max() > 0, f"Ratios must not be all zeros. Got: {ratios}"
+    ratios = ratios / np.sum(ratios)
+
+    return ratios
+
 #----------------------------------------------------------------------------

@@ -7,8 +7,8 @@ import traceback
 from typing import Any, Iterator
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 
+from beartype import beartype
 import numpy as np
 from torch.utils.data import IterableDataset
 from loguru import logger
@@ -25,6 +25,7 @@ import sds.utils.os_utils as os_utils
 SAMPLE_DISK_USAGE_FIELD = '__disk_usage__' # The total size of the sample in bytes.
 PROCESSED_FIELD = '__is_processed__' # A flag to mark the sample as processed.
 SAMPLE_KEY_FIELD = '__sample_key__' # A key for the sample, corresponding to the index column value.
+DATA_TYPE_FIELD = '__data_type__' # The data type of the sample, e.g. 'csv', 'json', 'parquet', etc.
 SCHEDULE_BATCH_SIZE = 30_000 # The number of samples to schedule for download in one batch.
 MIN_NUM_PENDING_TASKS_THRESH = 5_000
 
@@ -146,6 +147,11 @@ class StreamingDataset(IterableDataset):
         """
         return self.index_meta.num_samples
 
+    @beartype
+    def set_progress(self, epoch: int, sample_in_epoch: int | None=None) -> None:
+        self.epoch = epoch
+        self.sample_in_epoch = sample_in_epoch if sample_in_epoch is not None else 0
+
     @staticmethod
     def partition_len(self) -> int:
         if self.index_slice is None:
@@ -225,6 +231,7 @@ class StreamingDataset(IterableDataset):
 
         # Augmenting with special keys.
         sample[SAMPLE_KEY_FIELD] = sample_meta[self.index_col_name]  # Add a key for the sample.
+        sample[DATA_TYPE_FIELD] = str(self.data_type)  # Add the data type of the sample.
 
         # Some transforms may return multiple samples, so we yield from them instead of returning a single sample.
         yield from apply_transforms_recursively(sample, self.transforms)
