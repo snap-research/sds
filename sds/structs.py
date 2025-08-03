@@ -10,7 +10,6 @@ DEFAULT_TIMEOUT = 60.0 # In seconds.
 #---------------------------------------------------------------------------
 # Data-related constants and types.
 
-@dataclass(frozen=True)
 class DataSampleType(Enum):
     IMAGE = 'IMAGE'
     VIDEO = 'VIDEO'
