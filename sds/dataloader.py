@@ -126,16 +126,13 @@ class MultiStreamDataLoader:
         return self.streams[self._main_stream_idx]
 
     def state_dict(self) -> dict[str, Any]:
-        stream_states = [dl.dataset.state_dict() if hasattr(dl, 'dataset') and hasattr(dl.dataset, 'state_dict') else None for dl in self.dataloaders]
-        return {'stream_states': stream_states}
+        return {'stream_states': [s.dataset.state_dict() for s in self.streams]}
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
         assert 'stream_states' in state_dict, "State dict must contain 'stream_states'."
-        for dl, state in zip(self.dataloaders, state_dict['stream_states']):
-            if hasattr(dl, 'dataset') and hasattr(dl.dataset, 'load_state_dict') and state is not None:
-                dl.dataset.load_state_dict(state)
-            elif state is not None:
-                raise ValueError("Stream dataset does not support loading state dict.")
+        assert len(state_dict['stream_states']) == len(self.streams), f"Expected {len(self.streams)} stream states, but got {len(state_dict['stream_states'])}."
+        for s, state in zip(self.streams, state_dict['stream_states']):
+            s.dataset.load_state_dict(state)
 
     def _yield_batches_from_stream(self, stream_idx: int) -> Iterator[Batch]:
         # TODO: we assume that the batch is a dict and has already been collated.
