@@ -7,6 +7,7 @@ A streaming dataset which fetches and yields samples on the fly, witch caching/e
 - Has caching and eviction logic, so that you can efficiently work with large datasets without hitting disk space limits.
 - Has standard data processing transforms for images, videos, audios, text, and metadata.
 - Supports random access (through blocking calls)!
+- Multi-stream dataloader (i.e., streaming from multiple data sources in parallel).
 
 Based on: [snap-datastream](https://github.sc-corp.net/Snapchat/snap-datastream)
 
@@ -116,8 +117,9 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] State dict management.
 - [x] Can we construct a remote S3 index in parallel?
 - [x] Construct an index for a local/remote directory.
-- [ ] Sometimes, we can have less raw index files that nodes.
+- [x] Sometimes, we can have less raw index files that nodes.
 - [x] Missing fields should be populated in the dataloader or index meta or where? (I guess, they should automatically be filled with `None` in the index).
+- [x] Re-slice indicies based on sample counts and number of nodes.
 
 ### TODOs for V2.5
 - [ ] SQLite index instead of parquet.

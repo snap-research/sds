@@ -12,6 +12,11 @@ import torch
 from torch.utils.data import get_worker_info
 
 #----------------------------------------------------------------------------
+
+_LOCAL_NODE_GROUP: torch.distributed.ProcessGroup | None = None  # Cache for the local node process group
+_LOCAL_MASTERS_GROUP: torch.distributed.ProcessGroup | None = None  # Cache for the local masters group
+
+#----------------------------------------------------------------------------
 # Initialization utils.
 
 def init(disable_c10d_logging: bool=True, timeout_seconds: int=None):
@@ -264,8 +269,6 @@ def broadcast_object(obj: Any, src: int = 0, group=None) -> Any:
     torch.distributed.broadcast_object_list(object_list, src=src, group=group)
     return object_list[0]
 
-_LOCAL_NODE_GROUP: torch.distributed.ProcessGroup | None = None  # Cache for the local node process group
-
 def get_local_node_group() -> torch.distributed.ProcessGroup | None:
     """
     Initializes and returns a process group for intra-node communication.
@@ -300,6 +303,40 @@ def get_local_node_group() -> torch.distributed.ProcessGroup | None:
     _LOCAL_NODE_GROUP = torch.distributed.new_group(ranks=ranks_on_my_node)
     return _LOCAL_NODE_GROUP
 
+def get_local_masters_group() -> torch.distributed.ProcessGroup | None:
+    """
+    Initializes and returns a process group for inter-node communication
+    between local master ranks (local_rank == 0).
+
+    This group is essential for operations that should only be performed
+    once per node, such as aggregating evaluation results. The group is
+    cached to avoid re-creation.
+
+    Returns:
+        torch.distributed.ProcessGroup | None: The process group for all local masters,
+                                               or None if distributed training is not initialized.
+    """
+    global _LOCAL_MASTERS_GROUP
+    if _LOCAL_MASTERS_GROUP is not None:
+        return _LOCAL_MASTERS_GROUP
+
+    if not torch.distributed.is_initialized():
+        return None
+
+    world_size = get_world_size()
+    local_world_size = get_local_world_size()
+
+    # A local master has local_rank == 0. Their global ranks will be
+    # 0, local_world_size, 2*local_world_size, ...
+    # This assumes a uniform number of processes per node.
+    local_master_ranks = list(range(0, world_size, local_world_size))
+
+    # Create the new group
+    _LOCAL_MASTERS_GROUP = torch.distributed.new_group(ranks=local_master_ranks)
+    num_local_masters = torch.distributed.get_world_size(group=_LOCAL_MASTERS_GROUP)
+    assert num_local_masters == world_size // local_world_size, f"Expected {world_size // local_world_size} local masters, but got {num_local_masters}."
+    return _LOCAL_MASTERS_GROUP
+
 
 def broadcast_object_locally(obj: Any, local_src: int = 0) -> Any:
     """
@@ -330,6 +367,51 @@ def broadcast_object_locally(obj: Any, local_src: int = 0) -> Any:
 
     # Use the existing `broadcast_object` helper but specify the local group.
     return broadcast_object(obj, src=global_src_rank, group=local_group)
+
+
+def merge_dicts_across_local_masters(local_dict: dict[str, Any]) -> dict[str, Any]:
+    """
+    Merges dictionaries from all local master ranks (local_rank == 0) into one.
+
+    This function should ONLY be called by processes that are local masters
+    (i.e., where `get_local_rank() == 0`). Other ranks must not call this
+    function to prevent deadlocks. It first gathers all dictionaries into a list,
+    then merges them into a single dictionary.
+
+    Args:
+        local_dict (dict[str, Any]): The dictionary from the current local master process.
+
+    Returns:
+        dict[str, Any]: A new dictionary containing the merged key-value pairs
+                        from all local master nodes. All participating ranks
+                        (the local masters) receive the same merged dictionary.
+                        Returns the original dict if not in a distributed setting.
+    """
+    if not torch.distributed.is_initialized() or get_world_size() <= 1 or get_world_size() == get_local_world_size():
+        return local_dict
+
+    # Crucial check: This function's logic is only valid for local masters.
+    # Calling it on other ranks will cause a deadlock because they are not
+    # part of the communication group.
+    assert get_local_rank() == 0, f"merge_dicts_across_local_masters should only be called by local masters, but got local_rank={get_local_rank()}."
+
+    # Get the process group containing only the local masters.
+    masters_group = get_local_masters_group()
+    num_masters = get_world_size() // get_local_world_size()  # Number of local masters is world_size divided by local_world_size
+    gathered_list = [None] * num_masters
+
+    # `all_gather_object` collects a picklable object from each rank in the group
+    # and distributes the resulting list to all ranks in the group.
+    torch.distributed.all_gather_object(gathered_list, local_dict, group=masters_group)
+
+    # Merge the list of dictionaries into a single dictionary.
+    # Since keys are guaranteed to have the same values, a simple update is sufficient.
+    global_dict = {}
+    for d in gathered_list:
+        if isinstance(d, dict):
+            global_dict.update(d)
+
+    return global_dict
 
 #----------------------------------------------------------------------------
 # Pytorch dataloader worker info.

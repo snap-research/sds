@@ -41,7 +41,11 @@ def probabilities_to_counts(probabilities: list[float] | np.ndarray, min_count: 
     """
     assert all(p >= 0 for p in probabilities), "Probabilities must be non-negative."
     total_prob = sum(probabilities)
+
     if total_prob == 0:
+        return [min_count] * len(probabilities)
+    if all(p == 1 / len(probabilities) for p in probabilities):
+        # A convenient shortcut: if all probabilities are equal, return the same count for each.
         return [min_count] * len(probabilities)
 
     probabilities = np.array(probabilities)

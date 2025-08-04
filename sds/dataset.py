@@ -36,8 +36,6 @@ class StreamingDataset(IterableDataset):
         src: str, # a CSV file path, a JSON file path, or a directory path (possibly remote)
         dst: str, # A local directory path where to store the samples
         data_type: DataSampleType | str, # The type of the dataset, e.g. 'csv', 'json', 'parquet', or 'directory'
-        # local_shm_path: str, # A local file system path which only the workers of the current node can access.
-        # global_shm_path: str, # A global file system path which any rank can access globally.
         name: str | None=None, # A name for the dataset, used to identify it in the logs and metrics.
         shuffle_seed: int | None=None, # Shuffle seed for the dataset.
         transforms: list[Callable]=None, # A list of data augmentation callbacks to apply to the samples.

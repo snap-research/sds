@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 
+from beartype import beartype
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -87,33 +88,32 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
         dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, 'split_file_paths.txt')
         CloudDownloader.get(src).direct_download(remote=src, local=dst)
         with open(dst, 'r') as f:
-            index_files_list = [line.strip() for line in f if line.strip()]
-        src_exts = {os_utils.file_ext(f).lower() for f in index_files_list}
-        assert len(src_exts) == 1, f"Expected all files to have the same extension, but found: {src_exts}. This is an SDS bug, and we have a problem with data processing."
-        src_ext = src_exts.pop()  # Get the single extension from the set.
+            index_files_list = sorted([line.strip() for line in f if line.strip()])
     else:
         # Index files are passed as a wildcard path (e.g., 's3://bucket/path/*.csv'). Let's find them all.
         src_ext = os_utils.file_ext(src).lower()
-        index_files_list = os_utils.find_files_in_src(src.replace(f'*{src_ext}', ''), exts={src_ext}) # Remove the wildcard from the src path.
-
-    assert src_ext in ['.csv', '.json', '.parquet'], f"Expected the index files to be in CSV, JSON or PARQUET format, but found: {src_ext}. This is an SDS bug, and we have a problem with data processing."
+        index_files_list = sorted(os_utils.find_files_in_src(src.replace(f'*{src_ext}', ''), exts={src_ext})) # Remove the wildcard from the src path.
 
     # Once we have the list of files, we need to distribute them across nodes.
-    # We distribute the data across nodes on a per-file basis instead of per-sample basis. This mainly affects shuffling.
+    # We distribute the data across nodes on a per-sample basis, but there is a catch: some nodes might have more samples than others.
+    # So we first need to get the index file sizes, and then re-distribute them.
     node_rank = dist_utils.get_node_rank()
     num_files_per_node = len(index_files_list) // dist_utils.get_num_nodes()
     assert num_files_per_node > 0, f"Not enough files to distribute across nodes. Found {len(index_files_list)} files, but expected at least {dist_utils.get_num_nodes()} files per node."
     np.random.RandomState(shuffle_seed).shuffle(index_files_list)  # Shuffle the files list for randomness.
-    cur_node_files_list = index_files_list[node_rank * num_files_per_node:(node_rank + 1) * num_files_per_node]
+    cur_node_files_list: list[str] = index_files_list[node_rank * num_files_per_node - 1:(node_rank + 1) * num_files_per_node + 1] # Downloading with a slight overlap to ensure all the nodes have all the files cumulatively.
+    cur_dfs: dict[str, pd.DataFrame] = load_index_files(cur_node_files_list, dst_dir, already_loaded={})
+    sample_counts_local: dict[str, int] = {f: len(df) for f, df in cur_dfs.items()}
+    sample_counts_all: dict[str, int] = dist_utils.merge_dicts_across_local_masters(sample_counts_local)
 
-    # Now, we need to download them in parallel and save as a unified parquet file.
-    dst_files_list = [os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(f)) for f in cur_node_files_list]
-    os_utils.parallel_download(cur_node_files_list, dst_files_list, skip_if_exists=True, num_workers=16, verbose=True)
+    # Now, we can decide how to slice the data across nodes.
+    # We will slice the data based on the number of samples in each file.
+    slice_bounds: dict[str, tuple[int, int]] = compute_slicing_bounds(sample_counts_all, num_nodes=dist_utils.get_num_nodes())[node_rank]
+    node_files_list = [f for f, bounds in slice_bounds.items() if bounds[1] > bounds[0]] # Filter files that are part of the current node's slice.
+    dfs = load_index_files(node_files_list, dst_dir, already_loaded=cur_dfs)
+    assert len(dfs) > 0, f"Failed to load any index files for the current node. Files: {node_files_list}. This is likely an SDS bug, and we have a problem with data processing."
 
-    # Now, we can concatenate the data from all the files into a single DataFrame.
-    reader = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': lambda *args, **kwargs: pq.read_table(*args, **kwargs).to_pandas()}[src_ext]
-    index_list_raw_size = sum([os_utils.get_file_size(f) for f in dst_files_list])
-    df = pd.concat((reader(f) for f in tqdm(dst_files_list, desc=f"Loading in memory {len(dst_files_list)} <index>{src_ext} files. Raw size: {index_list_raw_size:,} bytes.")), ignore_index=True)
+    df = pd.concat([dfs[f].iloc[slice_bounds[f][0]:slice_bounds[f][1]] for f in dfs], ignore_index=True)
     df = maybe_shuffle_df(df, shuffle_seed)
     df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
@@ -133,11 +133,7 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
     assert os_utils.download_file(src, dst, skip_if_exists=True), f"Failed to download the index file from {src} to {dst}."
     assert os_utils.is_non_empty_file(dst), f"Failed to download the index file from {src} to {dst}."
 
-    # Reading the file.
-    src_ext = os_utils.file_ext(src).lower()
-    reader = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': pq.read_table}[src_ext]
-    logger.debug(f"Reading the index file {dst} into memory... Size: {os_utils.get_file_size(dst):,} bytes.")
-    df = reader(dst)
+    df = load_index_files([dst], dst_dir, already_loaded={})[dst]  # Download and load the file into memory as a DataFrame.
     if isinstance(df, pa.Table): # Convert to pandas DataFrame if it's a PyArrow Table.
         logger.debug(f"Converting the index file from PyArrow Table to pandas DataFrame...")
         df = df.to_pandas()
@@ -169,7 +165,7 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
         full_ext = os_utils.file_full_ext(file).lower() # Get the full extension (e.g., .jpg, .txt, etc.)
         if key not in data:
             continue # Skipping a file since it's some random file which is not matched with the main keys.
-        assert full_ext not in data[key], f"Duplicate key found: {key} with extension {full_ext}. This is an SDS bug, and we have a problem with data processing."
+        assert full_ext not in data[key], f"Duplicate key found: {key} with extension {full_ext}. This is likely an SDS bug, and we have a problem with data processing."
         data[key][full_ext[1:]] = file # Store the file path under the key and extension.
 
     # Convert the dict to a DataFrame
@@ -231,6 +227,7 @@ def maybe_shuffle_df(df: pd.DataFrame, shuffle_seed: int | None) -> pd.DataFrame
         df = df.sample(frac=1, replace=False, random_state=shuffle_seed)
     return df
 
+
 def maybe_slice_df(df: pd.DataFrame, max_size: int | None, index_type, cols_to_keep: list[str] | None=None) -> pd.DataFrame:
     """
     Slice the DataFrame to a maximum size if specified.
@@ -242,5 +239,60 @@ def maybe_slice_df(df: pd.DataFrame, max_size: int | None, index_type, cols_to_k
     df = df.head(max_size) if len(df) > max_size else df
     df = df[cols_to_keep] if cols_to_keep is not None else df # Keep only the specified columns if provided.
     return df
+
+@beartype
+def compute_slicing_bounds(sample_counts: dict[str, int], num_nodes: int) -> list[dict[str, tuple[int, int]]]:
+    """
+    Compute the slicing bounds for each sub-index based on the sub-index' amount of samples.
+    This is used to slice the data correctly across multiple nodes.
+    I.e., given {index1: 10, index2: 10, index3: 4}, we redistribute the samples as:
+        - num_nodes=2, node_rank=0 -> {index1: (0, 10), index2: (0, 2), index3: (0, 0)}
+        - num_nodes=2, node_rank=1 -> {index1: (0, 0), index2: (2, 10), index3: (0, 4)}
+    """
+    total_samples = sum(sample_counts.values())
+    sorted_keys = sorted(sample_counts.keys())
+
+    if total_samples == 0:
+        empty_bounds = {key: (0, 0) for key in sorted_keys}
+        return [empty_bounds] * num_nodes
+
+    all_node_bounds = []
+    for node_rank in range(num_nodes):
+        base_samples_per_node = total_samples // num_nodes
+        remainder = total_samples % num_nodes
+        global_node_start = node_rank * base_samples_per_node + min(node_rank, remainder)
+        global_node_end = global_node_start + base_samples_per_node + (1 if node_rank < remainder else 0)
+
+        node_slice_bounds = {}
+        cumulative_offset = 0
+        for key in sorted_keys:
+            count = sample_counts[key]
+            global_key_start = cumulative_offset
+            global_key_end = cumulative_offset + count
+            intersection_start = max(global_node_start, global_key_start)
+            intersection_end = min(global_node_end, global_key_end)
+
+            if intersection_start < intersection_end:
+                local_start = intersection_start - global_key_start
+                local_end = intersection_end - global_key_start
+                node_slice_bounds[key] = (local_start, local_end)
+            else:
+                node_slice_bounds[key] = (0, 0)
+            cumulative_offset += count
+        all_node_bounds.append(node_slice_bounds)
+    return all_node_bounds
+
+@beartype
+def load_index_files(index_files_list: list[str], dst_dir: str, already_loaded: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    # First, we need to download them in parallel and save as a unified parquet file.
+    dst_files_list: list[str] = [os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(f)) for f in index_files_list]
+    os_utils.parallel_download(index_files_list, dst_files_list, skip_if_exists=True, num_workers=16, verbose=True)
+
+    readers = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': lambda *args, **kwargs: pq.read_table(*args, **kwargs).to_pandas()}
+    memoized_reader = lambda f: already_loaded[f] if f in already_loaded else readers[os_utils.file_ext(f)](f)
+    index_list_raw_size = sum([os_utils.get_file_size(f) for f in dst_files_list])
+    dfs: dict[str, pd.DataFrame] = {f: memoized_reader(f) for f in tqdm(dst_files_list, desc=f"Loading in memory {len(dst_files_list)} index files. Raw size: {index_list_raw_size:,} bytes.")}
+
+    return dfs
 
 #---------------------------------------------------------------------------
