@@ -98,28 +98,32 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Lazy index so that we can efficiently initialize large datasets on a single node without hitting disk space limits
 - [x] Cache data + evict cold samples
 - [x] Video decoding
-- [ ] Audio loading
+- [x] Audio loading
 - [ ] Tutorial/usage examples
 - [x] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
-- [ ] More test coverage
+- [ ] More test coverage: state dict, resumal, index construction, deadlocks, sync-ed dataloader, etc.
 - [ ] Documentation
 - [x] Support for data provides as callbacks (possibly via forward/backward translation)
 - [x] There is no global shuffling right now, so smth like ImageNet training will be flawed.
 - [ ] Evict samples inside random access queries as well.
 - [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
 - [ ] Fix TODOs in the codebase.
-- [ ] Remove logging calls from the codebase.
+- [x] Remove logging calls from the codebase.
 - [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
 - [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
 - [ ] Shutdown for num_workers > 0 is quite slow. Not sure why.
 - [x] Clean broken samples from disk.
 - [x] Time-based garbage collection.
-- [ ] State dict management.
+- [x] Get/load state dict and make sure we resume from it.
 - [x] Can we construct a remote S3 index in parallel?
 - [x] Construct an index for a local/remote directory.
 - [x] Sometimes, we can have less raw index files that nodes.
 - [x] Missing fields should be populated in the dataloader or index meta or where? (I guess, they should automatically be filled with `None` in the index).
 - [x] Re-slice indicies based on sample counts and number of nodes.
+- [ ] Cache index: save to "cache" on S3 and load from cache (if present). Basically, if we are given a folder or split_file_paths.txt or *.csv, then we could save the index normally (though we should be careful about single-node vs multi-node cases).
+- [ ] VAE latents loading.
+- [ ] Video + .wav files loading (now we only support video files with embedded audio).
+- [ ] An option for interleaved indexing.
 
 ### TODOs for V2.5
 - [ ] SQLite index instead of parquet.

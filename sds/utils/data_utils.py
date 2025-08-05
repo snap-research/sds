@@ -7,10 +7,13 @@ import polars as pl
 
 #---------------------------------------------------------------------------
 
-def read_parquet_slice(path: str, N: int, K: int, columns: list[str] = None, region: str = None) -> pd.DataFrame:
+def read_parquet_slice(path: str, start_offset: int, end_offset: int, step: int=1, columns: list[str] = None, region: str = None) -> pd.DataFrame:
     """
-    Load a row slice [N:N+K] from a Parquet file or dataset in a memory-efficient manner.
+    Load a row slice [start_offset:end_offset:step] from a Parquet file or dataset in a memory-efficient manner.
+    The path for step=1 is highly optimized to prevent reading unused row groups and to minimize memory allocations.
     """
+    assert step >= 1, f"Step must be at least 1, got {step}."
+
     if path.startswith("s3://"):
         fsys = fs.S3FileSystem(region=region)
         path = path.replace("s3://", "")
@@ -18,20 +21,17 @@ def read_parquet_slice(path: str, N: int, K: int, columns: list[str] = None, reg
         fsys = fs.LocalFileSystem()
 
     dataset = pq.ParquetDataset(path, filesystem=fsys)
-
-    start_offset = N
-    end_offset = N + K
     rows_accumulated = 0
     tables_to_concat = []
 
     for fragment in dataset.fragments:
-        # THE FIX IS HERE: Use pq.ParquetFile() to get an object with row group metadata.
         pf = pq.ParquetFile(fragment.path, filesystem=fsys)
 
         for i in range(pf.num_row_groups):
             rg_meta = pf.metadata.row_group(i)
             rg_rows = rg_meta.num_rows
 
+            # This logic efficiently skips row groups entirely outside the slice boundaries.
             if rows_accumulated + rg_rows < start_offset:
                 rows_accumulated += rg_rows
                 continue
@@ -46,7 +46,24 @@ def read_parquet_slice(path: str, N: int, K: int, columns: list[str] = None, reg
             local_length = local_end - local_start
 
             if local_length > 0:
-                tables_to_concat.append(rg_table.slice(local_start, local_length))
+                if step == 1:
+                    # For step=1, use the original, highly memory-efficient logic.
+                    # This avoids creating intermediate index arrays and uses a simple slice.
+                    tables_to_concat.append(rg_table.slice(local_start, local_length))
+                else:
+                    # For step > 1, use the separate logic which is slightly less memory-efficient
+                    # but correctly handles stepping.
+                    contiguous_rg_slice = rg_table.slice(local_start, local_length)
+
+                    global_start_of_slice = rows_accumulated + local_start
+                    offset_from_global_start = global_start_of_slice - start_offset
+                    first_local_index = (step - (offset_from_global_start % step)) % step
+
+                    indices_to_take = pa.array(range(first_local_index, len(contiguous_rg_slice), step))
+
+                    if len(indices_to_take) > 0:
+                        stepped_table = contiguous_rg_slice.take(indices_to_take)
+                        tables_to_concat.append(stepped_table)
 
             rows_accumulated += rg_rows
 
@@ -62,6 +79,7 @@ def read_parquet_slice(path: str, N: int, K: int, columns: list[str] = None, reg
 
     result_table = pa.concat_tables(tables_to_concat)
     return result_table.to_pandas()
+
 
 def save_polars_parquet(df: pd.DataFrame, dst: str, group_size: int = 100_000):
     """

@@ -52,6 +52,7 @@ class StreamingDataset(IterableDataset):
         num_random_access_retries: int=5, # The number of retries to access a sample by its index.
         print_exceptions: bool=False, # If True, print exceptions in the main thread.
         print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
+        interleaved_indexing: bool=False, # If True, use interleaved slicing between workers for the dataset. It's very inefficient for grouped parquet files.
 
         # Some index optimization stuff.
         index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
@@ -75,6 +76,7 @@ class StreamingDataset(IterableDataset):
         self._disk_usage = 0 # Current cache usage in bytes.
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
         self.allow_missing_columns = allow_missing_columns
+        self.interleaved_indexing = interleaved_indexing
 
         # Random access parameters.
         self._num_random_access_retries = num_random_access_retries
@@ -290,7 +292,7 @@ class StreamingDataset(IterableDataset):
         global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
         self._maybe_init_worker_cache_limit(global_worker_rank, global_num_workers)
         if self.index_slice is None:
-            self.index_slice = load_index_slice(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes())
+            self.index_slice = load_index_slice(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes(), interleaved=self.interleaved_indexing)
 
         # Creating a list of sample IDs to iterate over. Assuming that they will fit in memory.
         sample_ids = list(range(len(self.index_slice)))

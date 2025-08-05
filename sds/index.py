@@ -182,12 +182,12 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
 #---------------------------------------------------------------------------
 # Loading functions for an already created index.
 
-def load_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int) -> pd.DataFrame:
+def load_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int, interleaved: bool=False) -> pd.DataFrame:
     assert index_meta.path.endswith('.parquet'), f"Index file must be a parquet file. Found: {index_meta.path}"
     start_time = time.time()
-    start_idx, num_samples_per_rank = compute_index_slice(index_meta, rank, num_ranks, num_nodes)
-    logger.debug(f"Loading index slice for rank {rank} (start_idx={start_idx}, num_samples_per_rank={num_samples_per_rank}) from {index_meta.path}")
-    index_slice = data_utils.read_parquet_slice(index_meta.path, start_idx, num_samples_per_rank)
+    start_idx, end_idx, step = compute_index_slice(index_meta, rank, num_ranks, num_nodes, interleaved=interleaved)
+    logger.debug(f"Loading index slice for rank {rank} (start_idx={start_idx}, end_idx={end_idx}, step={step}) from {index_meta.path} (interleaved={interleaved}).")
+    index_slice = data_utils.read_parquet_slice(index_meta.path, start_idx, end_idx, step=step)
     logger.debug(f"Loaded index slice for rank {rank} with {len(index_slice):,} samples. Time taken: {time.time() - start_time:.2f} seconds.")
     return index_slice
 
@@ -200,20 +200,27 @@ def load_index_row(index_meta: IndexMetaData, idx: int) -> pd.DataFrame:
     row_df = pl.scan_parquet(index_meta.path).slice(offset=idx, length=1).collect().to_pandas()
     return row_df
 
-def compute_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int) -> tuple[int, int]:
+
+def compute_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int, interleaved: bool=False) -> tuple[int, int, int]:
     if index_meta.index_type == IndexType.INTRA_NODE:
         # Each node has its own slicing.
         num_ranks_per_node = num_ranks // num_nodes
         num_samples_per_rank = index_meta.num_samples // num_ranks_per_node
         local_rank = rank % num_ranks_per_node
-        start_idx = local_rank * num_samples_per_rank
+        start_idx = local_rank if interleaved else (local_rank * num_samples_per_rank)
+        step = num_ranks_per_node if interleaved else 1
     elif index_meta.index_type == IndexType.INTER_NODE:
         num_samples_per_rank = index_meta.num_samples // num_ranks
-        start_idx = rank * num_samples_per_rank
+        start_idx = rank if interleaved else (rank * num_samples_per_rank)
+        step = num_ranks if interleaved else 1
     else:
         raise ValueError(f"Unknown index type: {index_meta}")
 
-    return start_idx, num_samples_per_rank
+    # E.g., start_idx = 0, step = 3, num_samples_per_rank = 5:
+    # end_idx = 0 + 5 * 3 = 15, so the indicies are [0, 3, 6, 9, 12].
+    end_idx = min(start_idx + num_samples_per_rank * step, index_meta.num_samples)
+
+    return start_idx, end_idx, step
 
 #---------------------------------------------------------------------------
 # Miscellaneous transforms.
