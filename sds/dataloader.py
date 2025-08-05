@@ -72,7 +72,7 @@ class StreamConfig:
         return batch_size, batch_gpu, num_accum_rounds
 
     @staticmethod
-    def init_group(raw_stream_configs: list[dict[str, dict | str]], drop_unused: bool=True) -> list["StreamConfig"]:
+    def init_group(raw_stream_configs: list[dict[str, dict | str]], drop_unused: bool=False) -> list["StreamConfig"]:
         """
         Initializes a group of streams using their configs in a way that the ratios are correctly normalized.
         """
@@ -135,6 +135,9 @@ class MultiStreamDataLoader:
         assert len(datasets) == len(stream_configs), f"Number of datasets ({len(datasets)}) must match the number of stream configs ({len(stream_configs)})."
 
         self.ratios = np.array([s.ratio for s in stream_configs])
+        unused_stream_idx = np.where(self.ratios <= 0)[0]
+        datasets = [d for i, d in enumerate(datasets) if i not in unused_stream_idx]
+        stream_configs = [s for i, s in enumerate(stream_configs) if i not in unused_stream_idx]
         self.counts = misc.probabilities_to_counts(self.ratios)
 
         worker_counts = MultiStreamDataLoader.split_across_consumers(self.ratios, num_workers) if num_workers > 0 else [0] * len(stream_configs)
