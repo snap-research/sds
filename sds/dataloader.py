@@ -156,9 +156,9 @@ class MultiStreamDataLoader:
         self.streams = []
         for stream_idx, opts in enumerate(stream_opts):
             assert isinstance(opts, StreamOptions), f"Expected stream_config to be of type StreamOptions, but got {type(opts)}."
-            assert 'batch_size' not in opts.dataloader_kwargs or opts.dataloader_kwargs['batch_size'] == opts.batch_size, \
-                f"Batch size in dataloader_kwargs ({opts.dataloader_kwargs.get('batch_size')}) must match the stream's batch size ({opts.batch_size})."
-            kwargs = {**common_dataloader_kwargs, **opts.dataloader_kwargs, **{'batch_size': opts.batch_size, 'num_workers': worker_counts[stream_idx]}}
+            assert 'batch_size' not in opts.dataloader_kwargs or opts.dataloader_kwargs['batch_size'] == opts.batch_gpu, \
+                f"Batch size in dataloader_kwargs ({opts.dataloader_kwargs.get('batch_size')}) must match the stream's per-gpu batch size ({opts.batch_gpu})."
+            kwargs = {**common_dataloader_kwargs, **opts.dataloader_kwargs, **{'batch_size': opts.batch_gpu, 'num_workers': worker_counts[stream_idx]}}
             dataloader = torch.utils.data.DataLoader(dataset=datasets[stream_idx], **kwargs)
             iterator = inf_loop_dataloader(dataloader)
             self.streams.append(Stream(dataset=datasets[stream_idx], iterator=iterator, dataloader=dataloader, opts=opts))

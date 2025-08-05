@@ -33,6 +33,9 @@ def coprime_seed(seed: int, N: int) -> int:
         a += 2
     return a % N
 
+#----------------------------------------------------------------------------
+# Misc utils.
+
 @beartype
 def probabilities_to_counts(probabilities: list[float] | np.ndarray, min_count: int = 1) -> list[int]:
     """
