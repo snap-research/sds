@@ -77,10 +77,6 @@ def is_local_main_process():
 def get_world_size():
     return torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
 
-def get_num_nodes() -> int:
-    # Assuming that we have the same number of GPUs per node.
-    return get_world_size() // max(torch.cuda.device_count(), 1)
-
 def info0(*args, **kwargs):
     if is_main_process():
         print(*args, **kwargs)
