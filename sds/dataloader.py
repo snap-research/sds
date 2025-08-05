@@ -42,7 +42,11 @@ class Batch(dict):
 
 
 @dataclass(frozen=True)
-class StreamConfig:
+class StreamOptions:
+    """
+    Contains dataset configuration details with some extra dataloading options/information.
+    TODO: it would be great if we could init the dataset from it...
+    """
     name: str
     ratio: float
     dataloader_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -72,9 +76,10 @@ class StreamConfig:
         return batch_size, batch_gpu, num_accum_rounds
 
     @staticmethod
-    def init_group(raw_stream_configs: list[dict[str, dict | str]], drop_unused: bool=False) -> list["StreamConfig"]:
+    def init_group(raw_stream_configs: list[dict[str, dict | str]], drop_unused: bool=False) -> list["StreamOptions"]:
         """
         Initializes a group of streams using their configs in a way that the ratios are correctly normalized.
+        TODO: it contains some fields which are not present in the StreamOptions, but are used in the dataset...
         """
         if any(s.get('ratio') is not None for s in raw_stream_configs):
             assert all(s.get('ratio') is not None for s in raw_stream_configs), f"If one stream has a ratio, all streams must have ratios: {raw_stream_configs}"
@@ -92,13 +97,13 @@ class StreamConfig:
             unique_names.add(name)
 
             # Validating and deciding the batching information.
-            batch_size, batch_gpu, num_accum_rounds = StreamConfig.infer_batch_info(
+            batch_size, batch_gpu, num_accum_rounds = StreamOptions.infer_batch_info(
                 batch_size=raw_config.get('batch_size'),
                 batch_gpu=raw_config.get('batch_gpu'),
                 num_accum_rounds=raw_config.get('num_accum_rounds'),
             )
 
-            stream_configs.append(StreamConfig(
+            stream_configs.append(StreamOptions(
                 ratio=ratios[i],
                 is_main=raw_config.get('is_main', False),
                 dataloader_kwargs=raw_config.get('dataloader_kwargs', {}),
@@ -114,7 +119,7 @@ class StreamConfig:
 @dataclass
 class Stream:
     dataset: torch.utils.data.Dataset
-    config: StreamConfig
+    opts: StreamOptions
     iterator: Iterator
     dataloader: torch.utils.data.DataLoader
 
@@ -124,23 +129,23 @@ class MultiStreamDataLoader:
     def __init__(
             self,
             datasets: list[torch.utils.data.Dataset],
-            stream_configs: list[StreamConfig],
+            stream_opts: list[StreamOptions],
             num_workers: int = 0,
             shuffle_seed: int | None = 42,
             schedule: str = 'shuffled_round_robin',
             **common_dataloader_kwargs,
         ):
         assert schedule in ['random', 'round_robin', 'shuffled_round_robin'], f"Unsupported schedule: {schedule}. Supported schedules are 'random', 'round_robin', and 'shuffled_round_robin'."
-        assert num_workers == 0 or num_workers >= len(stream_configs), f"num_workers ({num_workers}) must be 0 or at least the number of stream_configs ({len(stream_configs)})."
-        assert len(datasets) == len(stream_configs), f"Number of datasets ({len(datasets)}) must match the number of stream configs ({len(stream_configs)})."
+        assert num_workers == 0 or num_workers >= len(stream_opts), f"num_workers ({num_workers}) must be 0 or at least the number of stream_opts ({len(stream_opts)})."
+        assert len(datasets) == len(stream_opts), f"Number of datasets ({len(datasets)}) must match the number of stream configs ({len(stream_opts)})."
 
-        self.ratios = np.array([s.ratio for s in stream_configs])
+        self.ratios = np.array([s.ratio for s in stream_opts])
         unused_stream_idx = np.where(self.ratios <= 0)[0]
         datasets = [d for i, d in enumerate(datasets) if i not in unused_stream_idx]
-        stream_configs = [s for i, s in enumerate(stream_configs) if i not in unused_stream_idx]
+        stream_opts = [s for i, s in enumerate(stream_opts) if i not in unused_stream_idx]
         self.counts = misc.probabilities_to_counts(self.ratios)
 
-        worker_counts = MultiStreamDataLoader.split_across_consumers(self.ratios, num_workers) if num_workers > 0 else [0] * len(stream_configs)
+        worker_counts = MultiStreamDataLoader.split_across_consumers(self.ratios, num_workers) if num_workers > 0 else [0] * len(stream_opts)
         # We now have the notion of a "mini-epoch", for which we iterate over all the streams.
         self.epoch_size = sum(self.counts)
         self.shuffle_seed = shuffle_seed
@@ -149,16 +154,16 @@ class MultiStreamDataLoader:
 
         # Initializing the streams.
         self.streams = []
-        for stream_idx, config in enumerate(stream_configs):
-            assert isinstance(config, StreamConfig), f"Expected stream_config to be of type StreamConfig, but got {type(config)}."
-            assert 'batch_size' not in config.dataloader_kwargs or config.dataloader_kwargs['batch_size'] == config.batch_size, \
-                f"Batch size in dataloader_kwargs ({config.dataloader_kwargs.get('batch_size')}) must match the stream's batch size ({config.batch_size})."
-            kwargs = {**common_dataloader_kwargs, **config.dataloader_kwargs, **{'batch_size': config.batch_size, 'num_workers': worker_counts[stream_idx]}}
+        for stream_idx, opts in enumerate(stream_opts):
+            assert isinstance(opts, StreamOptions), f"Expected stream_config to be of type StreamOptions, but got {type(opts)}."
+            assert 'batch_size' not in opts.dataloader_kwargs or opts.dataloader_kwargs['batch_size'] == opts.batch_size, \
+                f"Batch size in dataloader_kwargs ({opts.dataloader_kwargs.get('batch_size')}) must match the stream's batch size ({opts.batch_size})."
+            kwargs = {**common_dataloader_kwargs, **opts.dataloader_kwargs, **{'batch_size': opts.batch_size, 'num_workers': worker_counts[stream_idx]}}
             dataloader = torch.utils.data.DataLoader(dataset=datasets[stream_idx], **kwargs)
             iterator = inf_loop_dataloader(dataloader)
-            self.streams.append(Stream(dataset=datasets[stream_idx], iterator=iterator, dataloader=dataloader, config=config))
+            self.streams.append(Stream(dataset=datasets[stream_idx], iterator=iterator, dataloader=dataloader, opts=opts))
 
-        self._main_stream_idx = next(i for i, s in enumerate(self.streams) if s.config.is_main) if any(s.config.is_main for s in self.streams) else np.argmax(self.ratios)
+        self._main_stream_idx = next(i for i, s in enumerate(self.streams) if s.opts.is_main) if any(s.opts.is_main for s in self.streams) else np.argmax(self.ratios)
 
     @staticmethod
     def split_across_consumers(ratios: list[float], total: int) -> list[int]:
@@ -189,14 +194,14 @@ class MultiStreamDataLoader:
     def _yield_batches_from_stream(self, stream_idx: int) -> Iterator[Batch]:
         # TODO: we assume that the batch is a dict and has already been collated.
         stream = self.streams[stream_idx]
-        num_accum_rounds_left = stream.config.num_accum_rounds
+        num_accum_rounds_left = stream.opts.num_accum_rounds
 
         while num_accum_rounds_left > 0:
             num_accum_rounds_left -= 1
 
             yield Batch(
                 raw_batch=next(stream.iterator),
-                stream_name=stream.config.name or f'stream_{stream_idx:03d}',
+                stream_name=stream.opts.name or f'stream_{stream_idx:03d}',
                 num_accum_rounds_left=num_accum_rounds_left,
                 data_type=stream.dataset.data_type,
             )
