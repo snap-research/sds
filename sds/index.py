@@ -290,10 +290,10 @@ def compute_slicing_bounds(sample_counts: dict[str, int], num_nodes: int) -> lis
     return all_node_bounds
 
 @beartype
-def load_index_files(index_files_list: list[str], dst_dir: str, already_loaded: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+def load_index_files(index_files_list: list[str], dst_dir: str, already_loaded: dict[str, pd.DataFrame], **download_kwargs) -> dict[str, pd.DataFrame]:
     # First, we need to download them in parallel and save as a unified parquet file.
     dst_files_list: list[str] = [os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(f)) for f in index_files_list]
-    os_utils.parallel_download(index_files_list, dst_files_list, skip_if_exists=True, num_workers=16, verbose=True)
+    os_utils.parallel_download(index_files_list, dst_files_list, num_workers=16, verbose=True, **download_kwargs)
 
     readers = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': lambda *args, **kwargs: pq.read_table(*args, **kwargs).to_pandas()}
     memoized_reader = lambda f: already_loaded[f] if f in already_loaded else readers[os_utils.file_ext(f)](f)

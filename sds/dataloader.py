@@ -16,19 +16,19 @@ import sds.utils.distributed as dist_utils
 
 class ScheduleType(Enum):
     RANDOM = 'random'
-    ROUND_ROBIN = 'round_robin'
-    SHUFFLED_ROUND_ROBIN = 'shuffled_round_robin'
+    RANDOM_ORDER = 'random_order'
+    CONSECUTIVE = 'consecutive'
 
     @classmethod
     def from_str(cls, schedule: str) -> 'ScheduleType':
         if schedule == 'random':
             return cls.RANDOM
-        elif schedule == 'round_robin':
-            return cls.ROUND_ROBIN
-        elif schedule == 'shuffled_round_robin':
-            return cls.SHUFFLED_ROUND_ROBIN
+        elif schedule == 'random_order':
+            return cls.RANDOM_ORDER
+        elif schedule == 'consecutive':
+            return cls.CONSECUTIVE
         else:
-            raise ValueError(f"Unsupported schedule: {schedule}. Supported schedules are 'random', 'round_robin', and 'shuffled_round_robin'.")
+            raise ValueError(f"Unsupported schedule: {schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'.")
 
 
 class Batch(dict):
@@ -132,10 +132,10 @@ class MultiStreamDataLoader:
             stream_opts: list[StreamOptions],
             num_workers: int = 0,
             shuffle_seed: int | None = 42,
-            schedule: str = 'shuffled_round_robin',
+            schedule: str = 'random_order',
             **common_dataloader_kwargs,
         ):
-        assert schedule in ['random', 'round_robin', 'shuffled_round_robin'], f"Unsupported schedule: {schedule}. Supported schedules are 'random', 'round_robin', and 'shuffled_round_robin'."
+        assert schedule in ['random', 'consecutive', 'random_order'], f"Unsupported schedule: {schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'."
         assert num_workers == 0 or num_workers >= len(stream_opts), f"num_workers ({num_workers}) must be 0 or at least the number of stream_opts ({len(stream_opts)})."
         assert len(datasets) == len(stream_opts), f"Number of datasets ({len(datasets)}) must match the number of stream configs ({len(stream_opts)})."
 
@@ -146,11 +146,11 @@ class MultiStreamDataLoader:
         self.counts = misc.probabilities_to_counts(self.ratios)
 
         worker_counts = MultiStreamDataLoader.split_across_consumers(self.ratios, num_workers) if num_workers > 0 else [0] * len(stream_opts)
-        # We now have the notion of a "mini-epoch", for which we iterate over all the streams.
-        self.epoch_size = sum(self.counts)
+        # We now have the notion of a "meta-iteration", for which we iterate over all the streams.
+        self.meta_iteration_size = sum(self.counts)
         self.shuffle_seed = shuffle_seed
         self.schedule: ScheduleType = ScheduleType.from_str(schedule)
-        assert self.schedule == 'random' or self.epoch_size < 5_000_000, f"TODO: we have a poor implementation of shuffled_round_robin which materializes the indices."
+        assert self.schedule == 'random' or self.meta_iteration_size < 5_000_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
 
         # Initializing the streams.
         self.streams = []
@@ -210,19 +210,19 @@ class MultiStreamDataLoader:
         num_batches_yielded = 0
 
         while True:
-            if self.schedule in [ScheduleType.ROUND_ROBIN, ScheduleType.SHUFFLED_ROUND_ROBIN]:
+            if self.schedule in [ScheduleType.CONSECUTIVE, ScheduleType.RANDOM_ORDER]:
                 cur_plan: list[int] = sum([[i] * c for i, c in enumerate(self.counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
-                if self.schedule == ScheduleType.SHUFFLED_ROUND_ROBIN:
-                    np.random.RandomState(num_batches_yielded + self.shuffle_seed).shuffle(cur_plan)
+                if self.schedule == ScheduleType.RANDOM_ORDER:
+                    np.random.RandomState(num_batches_yielded + 1007 * self.shuffle_seed).shuffle(cur_plan)
                 for stream_idx in cur_plan:
                     yield from self._yield_batches_from_stream(stream_idx)
                     num_batches_yielded += 1
             elif self.schedule == ScheduleType.RANDOM:
-                stream_idx = np.random.RandomState(num_batches_yielded + self.shuffle_seed).choice(len(self.streams), p=self.ratios)
-                yield self._yield_batches_from_stream(stream_idx)
+                stream_idx = np.random.RandomState(num_batches_yielded + 1007 * self.shuffle_seed).choice(len(self.streams), p=self.ratios)
+                yield from self._yield_batches_from_stream(stream_idx)
                 num_batches_yielded += 1
             else:
-                raise ValueError(f"Unsupported schedule: {self.schedule}. Supported schedules are 'random', 'round_robin', and 'shuffled_round_robin'.")
+                raise ValueError(f"Unsupported schedule: {self.schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'.")
 
 #----------------------------------------------------------------------------
 # Helper dataloading functions.

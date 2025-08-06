@@ -22,7 +22,7 @@ except FileNotFoundError:
 
 setup(
     name="streaming-dataset",
-    version="0.0.1",
+    version="0.1.0",
     author="Ivan Skorokhodov",
     author_email="iskorokhodov@snap.com",
     description="Streaming Dataset library for PyTorch",
