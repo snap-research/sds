@@ -2,6 +2,7 @@
 A set of presets for image/video/audio decoding and processing.
 """
 import io
+import math
 import pickle
 from typing import Union, Any
 from collections.abc import Callable
@@ -79,7 +80,6 @@ def lean_resize_frames(
 def reshape_image_as_single_frame_video(image: torch.Tensor) -> torch.Tensor:
     # Returns a [c, h, w] image as [1, c, h, w] video.
     assert len(image.shape) == 3, f"Wrong shape: {image.shape}."
-    assert image.shape[0] in (1, 3, 4), f"Wrong shape: {image.shape}."
     return image.unsqueeze(0) # [1, c, h, w]
 
 @beartype
@@ -239,6 +239,61 @@ def resize_waveform(waveform: torch.Tensor, target_length: int, mode: str='pad_o
         return waveform[:, :target_length]
 
 #----------------------------------------------------------------------------
+# VAE latents processing functions.
+
+@beartype
+def load_torch_state_from_pickle(latents_path: str) -> dict[str, torch.Tensor]:
+    with open(latents_path, 'rb') as f:
+        state = pickle.load(f)
+
+    state = {k: torch.tensor(v, dtype=torch.float32) for k, v in state.items()}
+
+    return state
+
+@beartype
+def sample_image_vae_latents(latents_dict: dict[str, torch.Tensor]) -> torch.Tensor:
+    mean, logvar = latents_dict['mean'], latents_dict['logvar'] # [lc, lh, lw], [lc, lh, lw]
+
+    assert mean.ndim == 3, f"Unsupported latent shape: {mean.shape}. Expected 3D tensor."
+    assert logvar.shape == mean.shape, f"Mean and logvar shapes do not match: {mean.shape} vs {logvar.shape}."
+
+    return mean + torch.randn_like(mean) * torch.exp(0.5 * logvar) # [lc, lh, lw]
+
+@beartype
+def sample_video_vae_latents(
+        latents_dict: dict[str, torch.Tensor],
+        original_full_shape: tuple[int, int, int, int],
+        num_rgb_frames_to_extract: int,
+        fps_orig: float,
+        fps_trg: float | None=None,
+        random_offset: bool=True
+    ) -> torch.Tensor:
+
+    mean, logvar = latents_dict['mean'], latents_dict['logvar'] # [lt | null, lc, lh, lw], [lt | null, lc, lh, lw]
+
+    assert mean.ndim == 4, f"Unsupported latent shape: {mean.shape}. Expected 4D tensor."
+    assert logvar.shape == mean.shape, f"Mean and logvar shapes do not match: {mean.shape} vs {logvar.shape}."
+
+    temporal_compression_rate = math.ceil(original_full_shape[0] / mean.shape[0])
+    num_latent_frames_to_extract = math.ceil(num_rgb_frames_to_extract / temporal_compression_rate)
+    if fps_trg is not None:
+        assert (fps_orig / fps_trg).is_integer() and fps_orig >= fps_trg, f"FPS ratio {fps_orig} / {fps_trg} is not a positive integer. For latents, we cant decode at arbitrary framerates."
+        frames_skip_factor = int(fps_orig / fps_trg)
+    else:
+        frames_skip_factor = 1
+
+    assert (num_latent_frames_to_extract * frames_skip_factor) <= mean.shape[0], f"Requested {num_latent_frames_to_extract} latent frames with skip factor {frames_skip_factor}, but only {mean.shape[0]} are available in the latents."
+
+    start_frame_idx = np.random.randint(low=0, high=mean.shape[0] - num_latent_frames_to_extract + 1) if random_offset else 0
+    latent_frames_idx = np.arange(start_frame_idx, start_frame_idx + num_latent_frames_to_extract, frames_skip_factor)
+    latent_frames_mean = mean[latent_frames_idx]  # [clip_length, lc, lh, lw]
+    latent_frames_logvar = logvar[latent_frames_idx]  # [clip_length, lc, lh, lw]
+
+    frames = latent_frames_mean + np.random.randn(*latent_frames_mean.shape) * np.exp(0.5 * latent_frames_logvar) # [clip_length | null, lc, lh, lw]
+
+    return frames
+
+#----------------------------------------------------------------------------
 # Miscellaneous transforms.
 
 @beartype
@@ -260,9 +315,6 @@ def load_pickle_embeddings(embeddings_path: str, num_tokens: int) -> torch.Tenso
 @beartype
 def none_to_empty_str(data: dict[str, Union[str, None]]) -> dict[str, Any]:
     return {k: (v if v is not None else '') for k, v in data.items()}
-
-def rename_fields(sample_data: dict[str, str], old_to_new_mapping: dict[str, str]) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    pass
 
 def one_hot_encode(label: int, num_classes: int) -> NDArray:
     """Converts a label to a one-hot encoded vector."""

@@ -174,6 +174,29 @@ class ResizeAudioTransform(BaseTransform):
         return sample
 
 #----------------------------------------------------------------------------
+# VAE latents processing transforms.
+
+class LoadLatentFromDiskTransform(BaseTransform):
+    """Loads VAE latents from a file."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=[self.input_field], absent=[])
+        sample[self.output_field] = SDF.load_torch_state_from_pickle(sample[self.input_field])
+        return sample
+
+class SampleVAELatentTransform(BaseTransform):
+    """Samples VAE latents from a sample."""
+    def __init__(self, input_field: str, output_field: str | None = None, mean_field: str='mean', logvar_field: str='logvar'):
+        self.input_field = input_field
+        self.output_field = output_field if output_field is not None else input_field
+        self.mean_field = mean_field
+        self.logvar_field = logvar_field
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: dict}, absent=[])
+        sample[self.output_field] = SDF.sample_image_vae_latents(sample[self.input_field])
+        return sample
+
+#----------------------------------------------------------------------------
 # Multi-modal transforms.
 
 @beartype
@@ -392,6 +415,23 @@ def create_standard_image_pipeline(image_field: str, return_image_as_single_fram
         DecodeImageTransform(input_field='image', output_field='image'),
         ResizeImageTransform(input_field='image', **resize_kwargs),
         ConvertImageToByteTensorTransform(input_field='image', output_field='image'),
+    ]
+
+    if return_image_as_single_frame_video:
+        transforms.extend([
+            ReshapeImageAsVideoTransform(input_field='image', output_field='video'),
+            FieldsFilteringTransform(fields_to_remove=['image']),
+            AugmentNewFieldsTransform(new_fields=dict(framerate=960.0)),
+        ])
+
+    return transforms
+
+@beartype
+def create_standard_image_latent_pipeline(image_latent_field: str, return_image_as_single_frame_video: bool = False) -> list[SampleTransform]:
+    """Creates a standard image dataloading transform by composing transform classes."""
+    transforms: list[SampleTransform] = [
+        LoadLatentFromDiskTransform(input_field=image_latent_field, output_field='image'),
+        SampleVAELatentTransform(input_field='image'),
     ]
 
     if return_image_as_single_frame_video:
