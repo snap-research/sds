@@ -349,6 +349,30 @@ class ClassNameToIDTransform:
         sample[self.output_field] = class_id
         return sample
 
+@beartype
+class GatherFieldsTransform:
+    """Gathers specified fields from the sample into a new dictionary."""
+    _supported_output_types = (dict, list, torch.Tensor)
+    def __init__(self, input_fields: list[str], output_field: str, output_type: type = dict):
+        assert output_type in self._supported_output_types, f"output_type must be in {self._supported_output_types}, got {output_type}."
+        assert len(input_fields) > 0, "At least one field must be specified to gather."
+        self.input_fields = input_fields
+        self.output_field = output_field
+        self.output_type = output_type
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=self.input_fields, absent=[])
+        if self.output_type is dict:
+            gathered_data = {field: sample[field] for field in self.input_fields}
+        elif self.output_type is list:
+            gathered_data = [sample[field] for field in self.input_fields]
+        elif self.output_type is torch.Tensor:
+            gathered_data = torch.stack([sample[field] for field in self.input_fields])
+        else:
+            raise ValueError(f"Unsupported output type: {self.output_type}. Supported types are dict and list.")
+        sample[self.output_field] = gathered_data
+        return sample
+
 #----------------------------------------------------------------------------
 # Misc data-processing transforms.
 
