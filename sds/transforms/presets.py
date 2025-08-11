@@ -5,7 +5,7 @@ They are structured as classes because they need to be pickleable for distribute
 """
 import json
 import random
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -225,7 +225,7 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         return sample
 
 #----------------------------------------------------------------------------
-# Label/text processing transforms.
+# Label/text/metadata processing transforms.
 
 def is_dummy_field(d: dict, field: str) -> bool:
     """Checks if a field is dummy: absent, None, or an empty string."""
@@ -329,6 +329,24 @@ class AddConstantFieldTransform:
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[], absent=[self.output_field])
         sample[self.output_field] = self.value
+        return sample
+
+@beartype
+class ClassNameToIDTransform:
+    """Converts a string class name to an integer ID."""
+    def __init__(self, input_field: str, class_name_to_id_mapping: dict[str, int] | Callable, output_field: str | None = None):
+        self.input_field = input_field
+        self.output_field = output_field if output_field is not None else input_field
+        self.class_name_to_id_mapping = class_name_to_id_mapping if class_name_to_id_mapping is not None else {}
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=[self.input_field], absent=[])
+        if callable(self.class_name_to_id_mapping):
+            class_id = self.class_name_to_id_mapping(sample[self.input_field])
+        else:
+            class_id = self.class_name_to_id_mapping.get(sample[self.input_field], -1)
+        assert class_id != -1, f"Class name '{sample[self.input_field]}' not found in mapping."
+        sample[self.output_field] = class_id
         return sample
 
 #----------------------------------------------------------------------------
