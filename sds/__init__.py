@@ -3,7 +3,7 @@ import sys
 from loguru import logger
 
 logger.disable("sds") # By default, disable all loggers whose names start with "sds".
-env_log_level = os.getenv("SDS_LOG_LEVEL") # Check for the user-defined environment variable.
+env_log_level = os.getenv("SDS_LOG_LEVEL", "INFO") # Check for the user-defined environment variable.
 
 if env_log_level:
     try:
@@ -14,4 +14,4 @@ if env_log_level:
     log_level = env_log_level.upper()
     logger.add(sys.stderr, level=log_level)
     logger.enable("sds")
-    logger.info(f"Logging for 'sds' and its submodules enabled at '{log_level}' level.")
+    logger.debug(f"Logging for 'sds' and its submodules enabled at '{log_level}' level.")
