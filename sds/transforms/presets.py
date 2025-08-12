@@ -392,13 +392,16 @@ class NameToIndexTransform:
 @beartype
 class RenameFieldsTransform:
     """Renames one or more fields in the sample."""
-    def __init__(self, old_to_new_mapping: dict[str, str]):
+    def __init__(self, old_to_new_mapping: dict[str, str], strict: bool = True):
         self.old_to_new_mapping = old_to_new_mapping
+        self.strict = strict
 
     def __call__(self, sample: SampleData) -> SampleData:
         for old_field, new_field in self.old_to_new_mapping.items():
-            assert old_field in sample, f"Field '{old_field}' not found in sample with keys {list(sample.keys())}."
-            sample[new_field] = sample.pop(old_field)
+            if old_field in sample:
+                sample[new_field] = sample.pop(old_field)
+            else:
+                assert not self.strict, f"Field '{old_field}' not found in sample with keys {list(sample.keys())} while it's required."
         return sample
 
 @beartype
