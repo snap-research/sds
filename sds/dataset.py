@@ -90,7 +90,7 @@ class StreamingDataset(IterableDataset):
         assert self.index_col_name not in self.columns_to_download, f"Index column {self.index_col_name} cannot be in columns_to_download: {self.columns_to_download}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
         assert self.columns_to_download is not None and len(self.columns_to_download) > 0, f"Need to specify columns_to_download, but got {self.columns_to_download}."
-        assert self._node_cache_limit > 100_000_000, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
+        assert self._node_cache_limit >= 100_000_000, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
 
         self.epoch = 0
         self.sample_in_epoch = 0 # What sample idx we are in the current epoch.
@@ -314,6 +314,8 @@ class StreamingDataset(IterableDataset):
                 yield from self._construct_samples(processed_sample_metas[sample_id])
             except Exception as e:
                 logger.error(f"Failed to construct samples from {sample_id}: {e}")
+                if self._print_traceback:
+                    logger.error(traceback.format_exc())
                 continue
             self._maybe_evict_cold_samples(processed_sample_metas)
             self._gc.maybe_collect()
