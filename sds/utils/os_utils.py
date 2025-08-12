@@ -37,6 +37,14 @@ def file_key(f: str) -> str:
     ext = file_full_ext(f)
     return basename[:-len(ext)] if ext else basename
 
+def path_key(path: str) -> str:
+    """Constructs a unique key for a file path"""
+    prefix = 's3-' if path.startswith('s3://') else ''
+    path = path.lstrip('s3://').rstrip('/')
+    parts = path.split('/')
+    main_key = '-'.join(parts[-2:])  # Use the last two parts as the main key
+    return f"{prefix}{main_key}"
+
 def filter_and_format_files(files, dir_path, exts=None, ignore_regex=None, full_path=True, uri_scheme=""):
     files = [f for f in files if file_ext(f).lower() in exts] if exts else files
 

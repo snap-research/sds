@@ -123,7 +123,8 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Cache index: save to "cache" on S3 and load from cache (if present). Basically, if we are given a folder or split_file_paths.txt or *.csv, then we could save the index normally (though we should be careful about single-node vs multi-node cases).
 - [ ] VAE latents loading.
 - [ ] Video + .wav files loading (now we only support video files with embedded audio).
-- [ ] An option for interleaved indexing.
+- [x] An option for interleaved indexing.
+- [ ] Refresh index cache when restarting the dataloader? I.e. at least change the new size...
 
 ### TODOs for V2.5
 - [ ] SQLite index instead of parquet.

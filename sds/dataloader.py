@@ -8,7 +8,6 @@ import torch
 
 from sds.structs import DataSampleType
 from sds.utils import misc
-from sds.utils import os_utils
 import sds.utils.distributed as dist_utils
 
 #----------------------------------------------------------------------------
@@ -133,6 +132,7 @@ class MultiStreamDataLoader:
             num_workers: int = 0,
             shuffle_seed: int | None = 42,
             schedule: str = 'random_order',
+            counts_precision: int = 6,
             **common_dataloader_kwargs,
         ):
         assert schedule in ['random', 'consecutive', 'random_order'], f"Unsupported schedule: {schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'."
@@ -143,7 +143,7 @@ class MultiStreamDataLoader:
         unused_stream_idx = np.where(self.ratios <= 0)[0]
         datasets = [d for i, d in enumerate(datasets) if i not in unused_stream_idx]
         stream_opts = [s for i, s in enumerate(stream_opts) if i not in unused_stream_idx]
-        self.counts = misc.probabilities_to_counts(self.ratios)
+        self.counts = misc.probabilities_to_counts(self.ratios, precision=counts_precision)
 
         worker_counts = MultiStreamDataLoader.split_across_consumers(self.ratios, num_workers) if num_workers > 0 else [0] * len(stream_opts)
         # We now have the notion of a "meta-iteration", for which we iterate over all the streams.

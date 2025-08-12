@@ -53,12 +53,13 @@ class StreamingDataset(IterableDataset):
         print_exceptions: bool=False, # If True, print exceptions in the main thread.
         print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
         interleaved_indexing: bool=False, # If True, use interleaved slicing between workers for the dataset. It's very inefficient for grouped parquet files.
+        max_index_files_to_use: int | None=None, # If specified, use only the first N index files for the dataset. Useful for debugging or testing.
 
         # Some index optimization stuff.
         index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
     ):
         _ = resolution # Unused, kept for compatibility with the genvid repo.
-        self.name: str = name if name is not None else os_utils.file_key(src)
+        self.name: str = name if name is not None else os_utils.path_key(src)
         self.src: str = src
         self.dst: str = dst
         self.data_type: DataSampleType = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
@@ -77,6 +78,7 @@ class StreamingDataset(IterableDataset):
         self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
         self.allow_missing_columns = allow_missing_columns
         self.interleaved_indexing = interleaved_indexing
+        self.max_index_files_to_use = max_index_files_to_use
 
         # Random access parameters.
         self._num_random_access_retries = num_random_access_retries
@@ -91,6 +93,7 @@ class StreamingDataset(IterableDataset):
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
         assert self.columns_to_download is not None and len(self.columns_to_download) > 0, f"Need to specify columns_to_download, but got {self.columns_to_download}."
         assert self._node_cache_limit >= 100_000_000, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
+        assert self._index_cols_to_keep is None or len(self._index_cols_to_keep) > 0, f"Must specify at least one column to keep in the index file, but got {self._index_cols_to_keep}."
 
         self.epoch = 0
         self.sample_in_epoch = 0 # What sample idx we are in the current epoch.
@@ -113,7 +116,15 @@ class StreamingDataset(IterableDataset):
         now = time.time()
         logger.debug('Building index...')
         if dist_utils.is_node_leader():
-            self.index_meta = build_index(self.src, self.dst, self.data_type, shuffle_seed=self.shuffle_seed, max_size=self._max_size, cols_to_keep=self._index_cols_to_keep)
+            self.index_meta = build_index(
+                src=self.src,
+                dst_dir=self.dst,
+                data_type=self.data_type,
+                shuffle_seed=self.shuffle_seed,
+                max_size=self._max_size,
+                cols_to_keep=self._index_cols_to_keep,
+                max_index_files_to_use=self.max_index_files_to_use,
+            )
         else:
             self.index_meta = None
         dist_utils.maybe_barrier()

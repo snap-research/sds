@@ -60,10 +60,13 @@ def get_local_rank():
 
 def get_local_world_size() -> int:
     """Returns the number of GPUs on the current node."""
-    return torch.cuda.device_count() if torch.distributed.is_initialized() else 1
+    if 'LOCAL_WORLD_SIZE' in os.environ:
+        return int(os.environ['LOCAL_WORLD_SIZE'])
+    else:
+        return torch.cuda.device_count() if torch.distributed.is_initialized() else 1
 
 def get_node_rank() -> int:
-    return get_rank() % get_local_world_size() # We assume that all the nodes have the same number of GPUs.
+    return get_rank() // get_local_world_size() # We assume that all the nodes have the same number of GPUs.
 
 def get_num_nodes() -> int:
     return get_world_size() // get_local_world_size()

@@ -43,7 +43,7 @@ class IndexMetaData:
 
 #---------------------------------------------------------------------------
 
-def build_index(src: str, dst_dir: str, data_type: DataSampleType, **kwargs) -> IndexMetaData:
+def build_index(src: str, dst_dir: str, data_type: DataSampleType, max_index_files_to_use: int | None=None, **kwargs) -> IndexMetaData:
     """
     This function builds an index (as pandas dataframe) of the dataset to load.
     Then it saves it (or its chunk) on the local disk as parquet for all the ranks to access.
@@ -66,7 +66,7 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, **kwargs) -> 
     src_ext = os_utils.file_ext(src).lower()
 
     if src.endswith('/split_file_paths.txt') or src.endswith(f'*{src_ext}'):
-        return build_index_from_many_index_files(src, dst_dir, **kwargs)
+        return build_index_from_many_index_files(src, dst_dir, max_index_files_to_use=max_index_files_to_use, **kwargs)
     elif any(src.endswith(ext) for ext in ['.csv', '.json', '.parquet']): # TODO: process parquet data more intelligently via slicing.
         return build_index_from_index_file(src, dst_dir, **kwargs)
     else:
@@ -75,7 +75,7 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, **kwargs) -> 
         return build_index_from_files_list(files_list, data_type=data_type, dst_dir=dst_dir, **kwargs)
 
 
-def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int, max_size: int=None, cols_to_keep: list[str] | None=None) -> IndexMetaData:
+def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int, max_size: int=None, cols_to_keep: list[str] | None=None, max_index_files_to_use: int | None=None) -> IndexMetaData:
     """
     This function builds an index from either `split_file_paths.txt` list or wildcard path (e.g., 's3://bucket/path/*.csv').
     It's an intra-node index, meaning that each node will process its own subset of data.
@@ -93,6 +93,10 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
         # Index files are passed as a wildcard path (e.g., 's3://bucket/path/*.csv'). Let's find them all.
         src_ext = os_utils.file_ext(src).lower()
         index_files_list = sorted(os_utils.find_files_in_src(src.replace(f'*{src_ext}', ''), exts={src_ext})) # Remove the wildcard from the src path.
+
+    assert len(index_files_list) > 0, f"No index files found in the source {src}. Please provide a valid source path or URL with index files."
+    assert max_index_files_to_use != 0, f"max_index_files_to_use must be greater than 0 or be None, got {max_index_files_to_use}."
+    index_files_list = index_files_list[:max_index_files_to_use] if max_index_files_to_use is not None else index_files_list
 
     # Once we have the list of files, we need to distribute them across nodes.
     # We distribute the data across nodes on a per-sample basis, but there is a catch: some nodes might have more samples than others.
@@ -117,7 +121,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     df = maybe_shuffle_df(df, shuffle_seed)
     df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
-    logger.debug(f"Saving the index to {index_dst} with {len(df):,} samples...")
+    logger.debug(f"[Node {node_rank}] Saving the index to {index_dst} with {len(df):,} samples...")
     data_utils.save_polars_parquet(df, index_dst)
     index_meta = IndexMetaData(len(df), index_dst, index_type)  # Placeholder for the actual number of samples.
 

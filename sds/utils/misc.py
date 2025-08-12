@@ -37,7 +37,7 @@ def coprime_seed(seed: int, N: int) -> int:
 # Misc utils.
 
 @beartype
-def probabilities_to_counts(probabilities: list[float] | np.ndarray, min_count: int = 1) -> list[int]:
+def probabilities_to_counts(probabilities: list[float] | np.ndarray, min_count: int = 1, precision: int | None=None) -> list[int]:
     """
     Converts a list of probabilities to counts, ensuring that each count is at least `min_count`.
     The sum of the counts will be equal to the sum of the probabilities multiplied by the total number of samples.
@@ -52,7 +52,10 @@ def probabilities_to_counts(probabilities: list[float] | np.ndarray, min_count: 
         return [min_count] * len(probabilities)
 
     probabilities = np.array(probabilities)
-    counts = probabilities / min([p for p in probabilities if p > 0])  # Normalize to avoid division by zero.
+    probabilities = probabilities if precision is None else np.round(probabilities, decimals=precision)
+    assert probabilities.max() > 0, f"Probabilities vanished after rounding: {probabilities}"
+    denominator = min([p for p in probabilities if p > 0]) # Normalize to avoid division by zero.
+    counts = probabilities / denominator
     counts = np.round(counts).astype(int)
     counts[counts < min_count] = min_count
     counts[probabilities == 0] = 0
