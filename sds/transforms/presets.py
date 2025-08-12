@@ -367,7 +367,7 @@ class GatherFieldsTransform:
         elif self.output_type is list:
             gathered_data = [sample[field] for field in self.input_fields]
         elif self.output_type is torch.Tensor:
-            gathered_data = torch.stack([sample[field] for field in self.input_fields])
+            gathered_data = torch.as_tensor([sample[field] for field in self.input_fields])
         else:
             raise ValueError(f"Unsupported output type: {self.output_type}. Supported types are dict and list.")
         sample[self.output_field] = gathered_data
