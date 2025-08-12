@@ -71,7 +71,7 @@ def read_parquet_slice(path: str, start_offset: int, end_offset: int, step: int=
             break
 
     if not tables_to_concat:
-        empty_schema = dataset.schema.to_arrow_schema()
+        empty_schema = dataset.schema
         if columns:
             fields = [field for field in empty_schema if field.name in columns]
             empty_schema = pa.schema(fields)
