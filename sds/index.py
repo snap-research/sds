@@ -101,7 +101,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     num_files_per_node = len(index_files_list) // dist_utils.get_num_nodes()
     assert num_files_per_node > 0, f"Not enough files to distribute across nodes. Found {len(index_files_list)} files, but expected at least {dist_utils.get_num_nodes()} files per node."
     np.random.RandomState(shuffle_seed).shuffle(index_files_list)  # Shuffle the files list for randomness.
-    cur_node_files_list: list[str] = index_files_list[node_rank * num_files_per_node - 1:(node_rank + 1) * num_files_per_node + 1] # Downloading with a slight overlap to ensure all the nodes have all the files cumulatively.
+    cur_node_files_list: list[str] = index_files_list[max(node_rank * num_files_per_node - 1, 0):(node_rank + 1) * num_files_per_node + 1] # Downloading with a slight overlap to ensure all the nodes have all the files cumulatively.
     cur_dfs: dict[str, pd.DataFrame] = load_index_files(cur_node_files_list, dst_dir, already_loaded={})
     sample_counts_local: dict[str, int] = {f: len(df) for f, df in cur_dfs.items()}
     sample_counts_all: dict[str, int] = dist_utils.merge_dicts_across_local_masters(sample_counts_local)
