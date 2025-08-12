@@ -445,6 +445,18 @@ class AugmentNewFieldsTransform:
             sample[field] = value
         return sample
 
+@beartype
+class ConvertDTypeTransform:
+    def __init__(self, input_field: str, output_field: str | None = None, output_dtype: torch.dtype = torch.float32):
+        self.input_field = input_field
+        self.output_field = output_field if output_field is not None else input_field
+        self.output_dtype = output_dtype
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: torch.Tensor}, absent=[])
+        sample[self.output_field] = sample[self.input_field].to(self.output_dtype)
+        return sample
+
 #----------------------------------------------------------------------------
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
