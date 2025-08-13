@@ -131,6 +131,16 @@ class DeleteVideoDecoderTransform(BaseTransform):
         del sample[self.input_field]
         return sample
 
+@beartype
+class NormalizeFramesTransform(BaseTransform):
+    """Normalizes video frames to [-1, 1] range."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: torch.Tensor}, absent=[])
+        assert sample[self.input_field].dtype == torch.uint8, \
+            f"Expected input field '{self.input_field}' to be of type torch.uint8, but got {sample[self.input_field].dtype}."
+        sample[self.output_field] = sample[self.input_field].float() / 127.5 - 1.0  # Normalize to [-1, 1]
+        return sample
+
 #----------------------------------------------------------------------------
 # Audio processing transforms.
 
@@ -464,7 +474,7 @@ class ConvertDTypeTransform:
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
 @beartype
-def create_standard_image_pipeline(image_field: str, return_image_as_single_frame_video: bool = False, **resize_kwargs) -> list[SampleTransform]:
+def create_standard_image_pipeline(image_field: str, return_image_as_single_frame_video: bool = False, normalize: bool=False, **resize_kwargs) -> list[SampleTransform]:
     """Creates a standard image dataloading transform by composing transform classes."""
     transforms: list[SampleTransform] = [
         LoadFromDiskTransform([image_field]),
@@ -473,6 +483,9 @@ def create_standard_image_pipeline(image_field: str, return_image_as_single_fram
         ResizeImageTransform(input_field='image', **resize_kwargs),
         ConvertImageToByteTensorTransform(input_field='image', output_field='image'),
     ]
+
+    if normalize:
+        transforms.append(NormalizeFramesTransform(input_field='image'))
 
     if return_image_as_single_frame_video:
         transforms.extend([
@@ -531,6 +544,7 @@ def create_standard_video_pipeline(
     video_field: str,
     num_frames: int,
     decode_kwargs={}, # Extra decoding parameters for DecodeVideoTransform
+    normalize: bool = False, # Whether to normalize the video frames to [-1, 1] range.
     **resize_kwargs,
 ):
     """
@@ -542,6 +556,9 @@ def create_standard_video_pipeline(
         ResizeVideoTransform(input_field='video', **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field='video'),
     ]
+
+    if normalize:
+        transforms.append(NormalizeFramesTransform(input_field='video'))
 
     return transforms
 
