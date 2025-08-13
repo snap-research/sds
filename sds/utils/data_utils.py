@@ -91,10 +91,8 @@ def save_polars_parquet(df: pd.DataFrame, dst: str, group_size: int = 100_000):
     assert group_size > 0, f"Group size must be greater than 0, got {group_size}."
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     for col in df.select_dtypes(include=['object']).columns:
-        if df[col].apply(type).nunique() > 1:
-            logger.warning(f"Column '{col}' has mixed types: casting to string in-place.")
-            df[col] = df[col].astype(str)
-    df_pl = pl.from_pandas(df)
+        df[col] = df[col].fillna(value=None) # Filling np.nan with None for non-numeric columns.
+    df_pl = pl.from_pandas(df).with_columns([pl.col(c).cast(pl.String) for c in object_cols])
     df_pl.write_parquet(dst, use_pyarrow=True, row_group_size=group_size)
 
 #---------------------------------------------------------------------------
