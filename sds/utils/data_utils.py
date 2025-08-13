@@ -4,6 +4,7 @@ import pyarrow.parquet as pq
 import pyarrow.fs as fs
 import pandas as pd
 import polars as pl
+from loguru import logger
 
 #---------------------------------------------------------------------------
 
@@ -86,7 +87,13 @@ def save_polars_parquet(df: pd.DataFrame, dst: str, group_size: int = 100_000):
     Saves a pandas DataFrame to a "Polars" Parquet file.
     TODO: I have no idea if polars saving is better than pandas saving in terms of pre-processing.
     """
+    assert isinstance(df, pd.DataFrame), f"Input must be a pandas DataFrame, got {type(df)}."
+    assert group_size > 0, f"Group size must be greater than 0, got {group_size}."
     os.makedirs(os.path.dirname(dst), exist_ok=True)
+    for col in df.select_dtypes(include=['object']).columns:
+        if df[col].apply(type).nunique() > 1:
+            logger.warning(f"Column '{col}' has mixed types: casting to string in-place.")
+            df[col] = df[col].astype(str)
     df_pl = pl.from_pandas(df)
     df_pl.write_parquet(dst, use_pyarrow=True, row_group_size=group_size)
 
