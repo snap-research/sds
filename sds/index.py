@@ -113,7 +113,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     # Now, we can decide how to slice the data across nodes.
     # We will slice the data based on the number of samples in each file.
     slice_bounds: dict[str, tuple[int, int]] = compute_slicing_bounds(sample_counts_all, num_nodes=dist_utils.get_num_nodes())[node_rank]
-    node_files_list = [f for f, bounds in slice_bounds.items() if bounds[1] > bounds[0]] # Filter files that are part of the current node's slice.
+    node_files_list = [index_files_list[i] for i, bounds in enumerate(slice_bounds.values()) if bounds[1] > bounds[0]] # Filter files that are part of the current node's slice.
     dfs = load_index_files(node_files_list, dst_dir, already_loaded=cur_dfs)
     assert len(dfs) > 0, f"Failed to load any index files for the current node. Files: {node_files_list}. This is likely an SDS bug, and we have a problem with data processing."
 
