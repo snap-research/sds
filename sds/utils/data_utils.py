@@ -90,9 +90,11 @@ def save_polars_parquet(df: pd.DataFrame, dst: str, group_size: int = 100_000):
     assert isinstance(df, pd.DataFrame), f"Input must be a pandas DataFrame, got {type(df)}."
     assert group_size > 0, f"Group size must be greater than 0, got {group_size}."
     os.makedirs(os.path.dirname(dst), exist_ok=True)
-    for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].fillna(value=None) # Filling np.nan with None for non-numeric columns.
-    df_pl = pl.from_pandas(df).with_columns([pl.col(c).cast(pl.String) for c in object_cols])
+    object_cols = df.select_dtypes(include=['object']).columns.tolist()
+    for col in object_cols:
+        df[col] = df[col].replace(pd.NA, None)  # Convert pandas NA to None for Polars compatibility
+        df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (float, int)) else x)  # Convert to string or None
+    df_pl = pl.from_pandas(df)
     df_pl.write_parquet(dst, use_pyarrow=True, row_group_size=group_size)
 
 #---------------------------------------------------------------------------
