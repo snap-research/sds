@@ -114,8 +114,9 @@ class StreamingDataset(IterableDataset):
 
     def build_index(self):
         now = time.time()
-        logger.debug('Building index...')
+        dist_utils.init_process_groups()
         if dist_utils.is_node_leader():
+            logger.debug(f'Building index on rank [{dist_utils.get_rank()}] for dataset {self.name} from source {self.src} to destination {self.dst}.')
             self.index_meta = build_index(
                 src=self.src,
                 dst_dir=self.dst,
@@ -126,10 +127,12 @@ class StreamingDataset(IterableDataset):
                 max_index_files_to_use=self.max_index_files_to_use,
             )
         else:
+            logger.debug(f'Waiting on rank [{dist_utils.get_rank()}] for the index to be built.')
             self.index_meta = None
         dist_utils.maybe_barrier()
+        logger.debug(f'Rank [{dist_utils.get_rank()}] finished building/waiting for building the index. Starting the broadcast.')
         self.index_meta = dist_utils.broadcast_object_locally(self.index_meta)
-        logger.debug(f'Constructed an index: {self.index_meta}. Took {time.time() - now:.2f} seconds.')
+        logger.debug(f'Got the index on rank [{dist_utils.get_rank()}]: {self.index_meta}. Took {time.time() - now:.2f} seconds.')
 
     def state_dict(self) -> dict[str, Any]:
         return {'epoch': self.epoch, 'sample_in_epoch': self.sample_in_epoch}

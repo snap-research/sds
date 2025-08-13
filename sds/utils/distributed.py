@@ -49,6 +49,21 @@ def init_random_state_and_cuda(seed: int, cudnn_benchmark: bool, allow_tf32: boo
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
     torch.set_float32_matmul_precision('high')
 
+def init_process_groups():
+    """
+    Initializes the process groups for distributed training.
+    This is a no-op if the process groups are already initialized.
+    """
+    if not torch.distributed.is_initialized():
+        return
+
+    logger.debug(f"Initializing process groups for distributed training on rank {get_rank()}...")
+    _ = get_local_node_group()  # Initialize the local node group
+    _ = get_local_masters_group()  # Initialize the local masters group
+
+    assert _LOCAL_NODE_GROUP is not None, f"Local node group is not initialized for rank {get_rank()}. What's going on?"
+    assert _LOCAL_MASTERS_GROUP is not None, f"Local masters group is not initialized for rank {get_rank()}. What's going on?"
+
 #----------------------------------------------------------------------------
 # Infra distributed utils.
 
@@ -268,6 +283,7 @@ def broadcast_object(obj: Any, src: int = 0, group=None) -> Any:
     torch.distributed.broadcast_object_list(object_list, src=src, group=group)
     return object_list[0]
 
+
 def get_local_node_group() -> torch.distributed.ProcessGroup | None:
     """
     Initializes and returns a process group for intra-node communication.
@@ -288,19 +304,19 @@ def get_local_node_group() -> torch.distributed.ProcessGroup | None:
     world_size = get_world_size()
     rank = get_rank()
     local_world_size = get_local_world_size()
-
-    # This logic assumes all nodes have the same number of GPUs (local_world_size)
-    current_node_id = rank // local_world_size
+    current_node_rank = get_node_rank()
 
     # Find all global ranks that are on the same node as the current process
-    ranks_on_my_node = []
-    for r in range(world_size):
-        if (r // local_world_size) == current_node_id:
-            ranks_on_my_node.append(r)
+    node_rank_to_node_group = {}
+    for node_rank in range(world_size // local_world_size):
+        maybe_barrier()  # Ensure all ranks reach this point before proceeding
+        ranks_on_node = list(range(node_rank * local_world_size, (node_rank + 1) * local_world_size))
+        node_group = torch.distributed.new_group(ranks=ranks_on_node)
+        if node_rank == current_node_rank:
+            _LOCAL_NODE_GROUP = node_group
 
-    # Create a new process group containing only the ranks on the local node
-    _LOCAL_NODE_GROUP = torch.distributed.new_group(ranks=ranks_on_my_node)
     return _LOCAL_NODE_GROUP
+
 
 def get_local_masters_group() -> torch.distributed.ProcessGroup | None:
     """
@@ -331,9 +347,8 @@ def get_local_masters_group() -> torch.distributed.ProcessGroup | None:
     local_master_ranks = list(range(0, world_size, local_world_size))
 
     # Create the new group
+    maybe_barrier()
     _LOCAL_MASTERS_GROUP = torch.distributed.new_group(ranks=local_master_ranks)
-    num_local_masters = torch.distributed.get_world_size(group=_LOCAL_MASTERS_GROUP)
-    assert num_local_masters == world_size // local_world_size, f"Expected {world_size // local_world_size} local masters, but got {num_local_masters}."
     return _LOCAL_MASTERS_GROUP
 
 
@@ -353,10 +368,7 @@ def broadcast_object_locally(obj: Any, local_src: int = 0) -> Any:
         return obj
 
     # Get the process group for the current node.
-    local_group = get_local_node_group()
-    if local_group is None:
-        # This case should ideally not be reached if distributed is initialized.
-        return obj
+    assert _LOCAL_NODE_GROUP is not None, f"Local node group is not initialized for rank {get_rank()}. Call init_process_groups() first."
 
     # The `src` argument for broadcast_object must be a global rank.
     # We calculate the global rank of the source process on the current node.
@@ -365,7 +377,7 @@ def broadcast_object_locally(obj: Any, local_src: int = 0) -> Any:
     global_src_rank = current_node_first_rank + local_src
 
     # Use the existing `broadcast_object` helper but specify the local group.
-    return broadcast_object(obj, src=global_src_rank, group=local_group)
+    return broadcast_object(obj, src=global_src_rank, group=_LOCAL_NODE_GROUP)
 
 
 def merge_dicts_across_local_masters(local_dict: dict[str, Any]) -> dict[str, Any]:
