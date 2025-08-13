@@ -5,6 +5,7 @@ import os
 import time
 from dataclasses import dataclass
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor
 
 from beartype import beartype
 import numpy as np
@@ -293,17 +294,44 @@ def compute_slicing_bounds(sample_counts: dict[str, int], num_nodes: int) -> lis
         all_node_bounds.append(node_slice_bounds)
     return all_node_bounds
 
+
 @beartype
-def load_index_files(index_files_list: list[str], dst_dir: str, already_loaded: dict[str, pd.DataFrame], **download_kwargs) -> dict[str, pd.DataFrame]:
-    # First, we need to download them in parallel and save as a unified parquet file.
-    dst_files_list: list[str] = [os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os_utils.path_key(f)) for f in index_files_list]
-    os_utils.parallel_download(index_files_list, dst_files_list, num_workers=64, verbose=True, **download_kwargs)
+def load_index_files(index_files_list: list[str], dst_dir: str, already_loaded: dict[str, pd.DataFrame], max_workers: int = 32, **download_kwargs) -> dict[str, pd.DataFrame]:
+    """
+    Downloads and loads index files in parallel into memory in a concise way.
+    """
+    # 1. Download files (this part is already concise)
+    dst_files_list = [os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os_utils.path_key(f)) for f in index_files_list]
+    os_utils.parallel_download(index_files_list, dst_files_list, num_workers=max_workers, verbose=True, **download_kwargs)
 
-    readers = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': lambda *args, **kwargs: pq.read_table(*args, **kwargs).to_pandas()}
-    memoized_reader = lambda f: already_loaded[f] if f in already_loaded else readers[os_utils.file_ext(f)](f)
-    index_list_raw_size = sum([os_utils.get_file_size(f) for f in dst_files_list])
-    dfs: dict[str, pd.DataFrame] = {f: memoized_reader(f) for f in tqdm(dst_files_list, desc=f"Loading in memory {len(dst_files_list)} index files. Raw size: {index_list_raw_size:,} bytes.")}
+    # 2. Determine which files actually need to be loaded
+    files_to_load = [f for f in dst_files_list if f not in already_loaded]
+    if not files_to_load:
+        return already_loaded
 
-    return dfs
+    # 3. Define readers and a nested loading function to use with `executor.map`
+    readers = {'.csv': pd.read_csv, '.json': pd.read_json, '.parquet': lambda f: pq.read_table(f).to_pandas()}
+
+    def load_file_tuple(filepath: str) -> tuple[str, pd.DataFrame | None]:
+        """Loads a file; returns (path, DataFrame) on success or (path, None) on failure."""
+        try:
+            return filepath, readers[os_utils.file_ext(filepath)](filepath)
+        except Exception as e:
+            print(f"Error loading {filepath}: {e}")
+            return filepath, None
+
+    # 4. Execute in parallel and build result dictionary in one go
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # executor.map runs `load_file_tuple` on each file.
+        # A dict comprehension consumes the results, filters failures, and builds the dictionary.
+        results_iterator = executor.map(load_file_tuple, files_to_load)
+        newly_loaded = {
+            path: df
+            for path, df in tqdm(results_iterator, total=len(files_to_load), desc="Loading files")
+            if df is not None
+        }
+
+    # 5. Return the merged dictionary of old and new data
+    return {**already_loaded, **newly_loaded}
 
 #---------------------------------------------------------------------------
