@@ -133,12 +133,12 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
     index_type = IndexType.INTER_NODE
     # We have just a single index file which contains all the data samples metadata.
     # First, download the file to the destination directory.
-    dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os.path.basename(src))
+    dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os_utils.path_key(src))  # Use the path key to avoid conflicts.
     logger.debug(f"Downloading the index file from {src} to {dst}...")
     assert os_utils.download_file(src, dst, skip_if_exists=True), f"Failed to download the index file from {src} to {dst}."
     assert os_utils.is_non_empty_file(dst), f"Failed to download the index file from {src} to {dst}."
 
-    df = load_index_files([dst], dst_dir, already_loaded={})[dst]  # Download and load the file into memory as a DataFrame.
+    df = next(iter(load_index_files([src], dst_dir, already_loaded={}).values()))  # Download and load the file into memory as a DataFrame.
     if isinstance(df, pa.Table): # Convert to pandas DataFrame if it's a PyArrow Table.
         logger.debug(f"Converting the index file from PyArrow Table to pandas DataFrame...")
         df = df.to_pandas()
