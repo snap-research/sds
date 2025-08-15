@@ -71,8 +71,7 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, max_index_fil
         return build_index_from_many_index_files(src, dst_dir, max_index_files_to_use=max_index_files_to_use, lazy=lazy, **kwargs)
     elif any(src.endswith(ext) for ext in ['.csv', '.json', '.parquet']): # TODO: process parquet data more intelligently via slicing.
         assert max_index_files_to_use is None, f"max_index_files_to_use is not supported for folder datasets. Got {max_index_files_to_use}."
-        assert not lazy, f"lazy is not yet supported for single-index datasets. Got {lazy}."
-        return build_index_from_index_file(src, dst_dir, **kwargs)
+        return build_index_from_index_file(src, dst_dir, lazy=lazy, **kwargs)
     else:
         files_list = os_utils.find_files_in_src(src)
         assert files_list, f"No files found in the source {src} for data type {data_type}."
@@ -100,7 +99,6 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
         src_ext = os_utils.file_ext(src).lower()
         assert src_ext == '.parquet' or not lazy, f"lazy is only supported for parquet files, got: {src_ext}."
         if lazy:
-            # num_samples_total = data_utils.count_parquet_rows_in_s3(src)
             num_samples_total = pl.scan_parquet(src).select(pl.count()).collect().item()
             num_samples_total = min(num_samples_total, max_size) if max_size is not None else num_samples_total
             return IndexMetaData(num_samples=num_samples_total, path=src, index_type=IndexType.INTER_NODE, lazy=True)
@@ -142,8 +140,15 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     return index_meta
 
 
-def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, max_size: int=None, cols_to_keep: list[str] | None=None) -> IndexMetaData:
+def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, max_size: int=None, lazy: bool=False, cols_to_keep: list[str] | None=None) -> IndexMetaData:
     index_type = IndexType.INTER_NODE
+
+    if lazy:
+        assert src.endswith('.parquet'), f"lazy is only supported for parquet files, got: {src}."
+        num_samples_total = pl.scan_parquet(src).select(pl.count()).collect().item()
+        num_samples_total = min(num_samples_total, max_size) if max_size is not None else num_samples_total
+        return IndexMetaData(num_samples=num_samples_total, path=src, index_type=index_type, lazy=True)
+
     # We have just a single index file which contains all the data samples metadata.
     # First, download the file to the destination directory.
     dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os_utils.path_key(src))  # Use the path key to avoid conflicts.
