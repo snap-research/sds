@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import types
 import hashlib
 import base64
@@ -10,14 +11,18 @@ from collections.abc import Callable
 
 from beartype import beartype
 import numpy as np
+import pandas as pd
 from torch.utils.data import IterableDataset
 from loguru import logger
+import polars as pl
 
 from sds.downloader import ParallelDownloader
 from sds.structs import DataSampleType, SampleData, SampleTransform
-from sds.index import build_index, load_index_slice, load_index_row
+from sds.index import build_index, load_index_partition, load_index_row
 import sds.utils.distributed as dist_utils
 import sds.utils.os_utils as os_utils
+from sds.utils import data_utils
+from sds.utils import misc
 
 #---------------------------------------------------------------------------
 # Special fields names.
@@ -54,6 +59,7 @@ class StreamingDataset(IterableDataset):
         print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
         interleaved_indexing: bool=False, # If True, use interleaved slicing between workers for the dataset. It's very inefficient for grouped parquet files.
         max_index_files_to_use: int | None=None, # If specified, use only the first N index files for the dataset. Useful for debugging or testing.
+        lazy_index_chunk_size: int | None=None, # If positive, would only be reading `index_chunk_size` rows from the index file at a time. Also, won't load the whole index into memory.
 
         # Some index optimization stuff.
         index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
@@ -75,10 +81,11 @@ class StreamingDataset(IterableDataset):
         self._node_cache_limit = os_utils.bytes_to_int(cache_limit)
         self._worker_cache_limit = None
         self._disk_usage = 0 # Current cache usage in bytes.
-        self._stored_sample_ids: deque[int] = deque() # A list of keys physicall stored on disk.
-        self.allow_missing_columns = allow_missing_columns
-        self.interleaved_indexing = interleaved_indexing
-        self.max_index_files_to_use = max_index_files_to_use
+        self._stored_sample_keys: deque[str] = deque() # A list of keys physicall stored on disk.
+        self._allow_missing_columns = allow_missing_columns
+        self._interleaved_indexing = interleaved_indexing
+        self._max_index_files_to_use = max_index_files_to_use
+        self._lazy_index_chunk_size = lazy_index_chunk_size
 
         # Random access parameters.
         self._num_random_access_retries = num_random_access_retries
@@ -94,12 +101,14 @@ class StreamingDataset(IterableDataset):
         assert self.columns_to_download is not None and len(self.columns_to_download) > 0, f"Need to specify columns_to_download, but got {self.columns_to_download}."
         assert self._node_cache_limit >= 100_000_000, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
         assert self._index_cols_to_keep is None or len(self._index_cols_to_keep) > 0, f"Must specify at least one column to keep in the index file, but got {self._index_cols_to_keep}."
+        assert self._lazy_index_chunk_size is None or self._lazy_index_chunk_size >= 100, f"Lazy index chunk size must >= 100, but got {self._lazy_index_chunk_size}."
 
         self.epoch = 0
         self.sample_in_epoch = 0 # What sample idx we are in the current epoch.
 
         self.build_index() # Build the index metadata. TODO: it's slow sometimes, so maybe we should to it lazily.
-        self.index_slice = None # Index will be initialized in __iter__(), when we know the workers.
+        self._index_partition = None # Index will be initialized in __iter__(), when we know the workers.
+        self.lazy_index: pl.LazyFrame = pl.scan_parquet(self.index_meta.path)
 
         self.downloader = self.init_downloader() # Initialize the downloader to download the shards in parallel.
 
@@ -124,7 +133,8 @@ class StreamingDataset(IterableDataset):
                 shuffle_seed=self.shuffle_seed,
                 max_size=self._max_size,
                 cols_to_keep=self._index_cols_to_keep,
-                max_index_files_to_use=self.max_index_files_to_use,
+                max_index_files_to_use=self._max_index_files_to_use,
+                lazy=self._lazy_index_chunk_size is not None and self._lazy_index_chunk_size > 0,
             )
         else:
             logger.debug(f'Waiting on rank [{dist_utils.get_rank()}] for the index to be built.')
@@ -168,9 +178,9 @@ class StreamingDataset(IterableDataset):
 
     @staticmethod
     def partition_len(self) -> int:
-        if self.index_slice is None:
+        if self._index_partition is None:
             raise RuntimeError("Index is not initialized. Call __iter__() first.")
-        return len(self.index_slice)
+        return len(self._index_partition)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         return self._safe_get_item(idx, num_retries_left=self._num_random_access_retries)
@@ -196,17 +206,17 @@ class StreamingDataset(IterableDataset):
         Get sample by global index, blocking to download it.
         Note that for an intra-node index, we can only get samples from the current node-level partition only.
         """
-        sample_meta = load_index_row(self.index_meta, sample_id).iloc[0].to_dict()
+        sample_meta = self.lazy_index.slice(offset=sample_id, length=1).collect().to_pandas().iloc[0].to_dict()
         total_size = self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=True)
         sample_meta[SAMPLE_DISK_USAGE_FIELD] = total_size
         # TODO: we need to store self._processed_sample_metas as an in-class property to be able to consider it for eviction.
-        # self._stored_sample_ids.append(sample_id)
+        # self._stored_sample_keys.append(sample_id)
         # self._disk_usage += total_size
         return next(self._construct_samples(sample_meta))
 
     def _schedule_download_(self, key: int | str, sample_meta: dict[str, Any], blocking: bool=False) -> Any:
         columns_to_download = [col for col in self.columns_to_download if col in sample_meta and sample_meta[col] is not None and sample_meta[col] != '']
-        assert self.allow_missing_columns or len(columns_to_download) == len(self.columns_to_download), \
+        assert self._allow_missing_columns or len(columns_to_download) == len(self.columns_to_download), \
             f"Some columns are missing in the sample meta: {sample_meta}. Expected columns: {self.columns_to_download}, available columns: {columns_to_download}."
         source_urls: list[str] = [sample_meta[col] for col in columns_to_download]
         destinations: list[str] = [os.path.join(self.dst, self.name, sample_meta[self.index_col_name] + os_utils.file_ext(sample_meta[col]).lower()) for col in columns_to_download]
@@ -223,18 +233,19 @@ class StreamingDataset(IterableDataset):
 
         return downloading_result # Return smth meaningful only for blocking calls.
 
-    def _schedule_downloads_(self, sample_ids: list[int], processed_sample_ids: dict[int, dict], start_id: int, num_to_schedule: int) -> int:
+    def _schedule_downloads_(self, index_chunk: pd.DataFrame, sample_ids: list[int], processed_sample_ids: dict[int, dict], start_id: int, num_to_schedule: int) -> int:
         num_to_schedule: int = min(num_to_schedule, len(sample_ids) - start_id)
         num_scheduled: int = 0
         for i in range(start_id, start_id + num_to_schedule):
             sample_id = sample_ids[i]
-            sample_meta: dict[str, Any] = self.index_slice.iloc[sample_id].to_dict()
+            sample_meta: dict[str, Any] = index_chunk.iloc[sample_id].to_dict()
+            sample_key = sample_meta[self.index_col_name]
             try:
-                self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=False)
+                self._schedule_download_(key=sample_key, sample_meta=sample_meta, blocking=False)
                 num_scheduled += 1
             except Exception as e:
                 logger.error(f"Failed to schedule download for sample {sample_meta}: {e}")
-            processed_sample_ids[sample_id] = sample_meta  # Store the sample meta in the preallocated list.
+            processed_sample_ids[sample_key] = sample_meta  # Store the sample meta in the preallocated list.
         logger.debug(f"Scheduled {num_scheduled} samples for download with {self.downloader}.")
         return num_scheduled
 
@@ -255,12 +266,12 @@ class StreamingDataset(IterableDataset):
         num_failures = 0
         while self._disk_usage > self._worker_cache_limit:
             try:
-                assert len(self._stored_sample_ids) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._worker_cache_limit}."
-                sample_id = self._stored_sample_ids.popleft() # Get the oldest sample key to evict.
-                assert sample_id in processed_sample_metas, f"Sample ID {sample_id} not found in processed_sample_metas."
-                self._delete_sample_from_disk(processed_sample_metas[sample_id])
-                self._disk_usage -= processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD]
-                del processed_sample_metas[sample_id]  # Remove the sample from the processed samples.
+                assert len(self._stored_sample_keys) > 0, f"The state has diverged, no samples to evict. Disk usage: {self._disk_usage}, cache limit: {self._worker_cache_limit}."
+                sample_key = self._stored_sample_keys.popleft() # Get the oldest sample key to evict.
+                assert sample_key in processed_sample_metas, f"Sample key {sample_key} not found in processed_sample_metas."
+                self._delete_sample_from_disk(processed_sample_metas[sample_key])
+                self._disk_usage -= processed_sample_metas[sample_key][SAMPLE_DISK_USAGE_FIELD]
+                del processed_sample_metas[sample_key]  # Remove the sample from the processed samples.
             except Exception as e:
                 logger.error(f"Failed to evict sample: {e}")
                 num_failures += 1
@@ -292,53 +303,70 @@ class StreamingDataset(IterableDataset):
         if hasattr(self, 'downloader') and self.downloader is not None:
             self.downloader.shutdown()
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
+    def _reset(self):
         if self.downloader.thread_pool is None:
             self.downloader.init_thread_pool()
         else:
             self.downloader.reset()
             self.downloader.stop() # Shutting down the previous downloader in an async way for its workers to finish and die.
             self.downloader = self.init_downloader()  # Reinitialize the downloader to reset its state.
-            # TODO: this looks like a bug.
             self._disk_usage = 0
-            self._stored_sample_ids.clear()
+            self._stored_sample_keys.clear()
 
-        global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
-        self._maybe_init_worker_cache_limit(global_worker_rank, global_num_workers)
-        if self.index_slice is None:
-            self.index_slice = load_index_slice(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes(), interleaved=self.interleaved_indexing)
-
-        # Creating a list of sample IDs to iterate over. Assuming that they will fit in memory.
-        sample_ids = list(range(len(self.index_slice)))
-        if self.shuffle_seed is not None:
-            logger.debug(f"Shuffling sample IDs with seed {self.shuffle_seed} for worker {global_worker_rank}.")
-            cur_seed = (self.shuffle_seed * 1_000_003 + self.epoch * 1_000_037 + global_worker_rank * 1_000_039) % (2**32)
-            sample_ids = np.random.RandomState(cur_seed).permutation(sample_ids).tolist()
-
+    def _iter_slice_(self, index_chunk: pd.DataFrame, global_worker_rank: int, processed_sample_metas: dict[str, dict[str, Any]]) -> Iterator[dict[str, Any]]:
+        sample_ids: list[int] = misc.get_shuffled_sample_ids(len(index_chunk), shuffle_seed=self.shuffle_seed, epoch=self.epoch, rank=global_worker_rank)
         schedule_start_sample_id: int = self.sample_in_epoch
-        processed_sample_metas: dict[dict[str, Any]] = {}
-        self._schedule_downloads_(sample_ids, processed_sample_metas, start_id=schedule_start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
+        self._schedule_downloads_(index_chunk, sample_ids, processed_sample_metas, start_id=schedule_start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
         schedule_start_sample_id += SCHEDULE_BATCH_SIZE
 
-        for sample_id, total_size in self.downloader.yield_completed_keys():
-            processed_sample_metas[sample_id][SAMPLE_DISK_USAGE_FIELD] = total_size
-            self._stored_sample_ids.append(sample_id)
-            self._disk_usage += total_size
+        for sample_key, total_sample_size in self.downloader.yield_completed_keys():
+            processed_sample_metas[sample_key][SAMPLE_DISK_USAGE_FIELD] = total_sample_size
+            self._stored_sample_keys.append(sample_key)
+            self._disk_usage += total_sample_size
+
             try:
-                yield from self._construct_samples(processed_sample_metas[sample_id])
+                yield from self._construct_samples(processed_sample_metas[sample_key])
             except Exception as e:
-                logger.error(f"Failed to construct samples from {sample_id}: {e}")
+                logger.error(f"Failed to construct samples from {sample_key}: {e}")
                 if self._print_traceback:
                     logger.error(traceback.format_exc())
                 continue
             self._maybe_evict_cold_samples(processed_sample_metas)
             self._gc.maybe_collect()
-            self.sample_in_epoch += 1
 
             if schedule_start_sample_id < len(sample_ids) and self.downloader.get_num_pending_tasks() < MIN_NUM_PENDING_TASKS_THRESH:
                 # If we have less than MIN_NUM_PENDING_TASKS_THRESH pending tasks, schedule more.
-                self._schedule_downloads_(sample_ids, processed_sample_metas, start_id=schedule_start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
+                self._schedule_downloads_(index_chunk, sample_ids, processed_sample_metas, start_id=schedule_start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
                 schedule_start_sample_id += SCHEDULE_BATCH_SIZE
+
+            # We need to increment the sample index regardless of whether the sample was processed successfully or not.
+            # Otherwise, we would start at a much earlier actual sample id when loading the state dict.
+            self.sample_in_epoch += 1
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        self._reset() # TODO: not sure if this resetting is correct...
+
+        global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
+        self._maybe_init_worker_cache_limit(global_worker_rank, global_num_workers)
+        processed_sample_metas: dict[str, dict[str, Any]] = {}
+        if not self.index_meta.lazy:
+            if self._index_partition is None:
+                self._index_partition = load_index_partition(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes(), interleaved=self._interleaved_indexing)
+            yield from self._iter_slice_(self._index_partition, global_worker_rank, processed_sample_metas)
+        else:
+            # Lazily fetching a chunk from the partition.
+            assert not self._interleaved_indexing, "Interleaved indexing is not supported for lazy indexing."
+            num_samples_per_worker = self.index_meta.num_samples // global_num_workers
+            num_chunks = (num_samples_per_worker + self._lazy_index_chunk_size - 1) // self._lazy_index_chunk_size
+            chunk_size_refined = math.floor(num_samples_per_worker / num_chunks)
+            chunk_ids = misc.get_shuffled_sample_ids(num_chunks, shuffle_seed=self.shuffle_seed, epoch=self.epoch, rank=global_worker_rank)
+            partition_start_sample_id = global_worker_rank * num_samples_per_worker
+            for chunk_id in chunk_ids:
+                start_sample_id = chunk_id * chunk_size_refined + partition_start_sample_id
+                end_sample_id = min(start_sample_id + chunk_size_refined, self.index_meta.num_samples)
+                # index_slice = data_utils.read_parquet_slice(self.index_meta.path, start_sample_id, end_sample_id, step=1)
+                index_slice = self.lazy_index.slice(start_sample_id, end_sample_id - start_sample_id).collect().to_pandas()
+                yield from self._iter_slice_(index_slice, global_worker_rank, processed_sample_metas)
 
         logger.debug(f"Yielded {self.sample_in_epoch} samples in epoch {self.epoch}.")
         self.sample_in_epoch = 0  # Reset the sample index for the next epoch.

@@ -15,7 +15,7 @@ from sds.index import (
     INDEX_FILE_NAME,
     build_index_from_files_list,
     build_index_from_index_file,
-    load_index_slice,
+    load_index_partition,
 )
 
 # Mocking the dependencies since they are not provided
@@ -137,7 +137,7 @@ class TestFileFunctions(unittest.TestCase):
         self.assertEqual(len(df), 2)
         self.assertListEqual(list(df.columns), ['image_path'])
 
-    def test_load_index_slice(self):
+    def test_load_index_partition(self):
         """Test loading a slice of the index."""
         # Create a dummy parquet file
         num_samples = 100
@@ -172,17 +172,17 @@ class TestFileFunctions(unittest.TestCase):
             mock_scan.side_effect = scan_side_effect
 
             # Rank 0
-            rank_0_df = load_index_slice(index_meta, rank=0, num_ranks=num_ranks, num_nodes=1)
+            rank_0_df = load_index_partition(index_meta, rank=0, num_ranks=num_ranks, num_nodes=1)
             self.assertEqual(len(rank_0_df), 25)
             self.assertEqual(rank_0_df['data'].iloc[0], 0)
 
             # Rank 2
-            rank_2_df = load_index_slice(index_meta, rank=2, num_ranks=num_ranks, num_nodes=1)
+            rank_2_df = load_index_partition(index_meta, rank=2, num_ranks=num_ranks, num_nodes=1)
             self.assertEqual(len(rank_2_df), 25)
             self.assertEqual(rank_2_df['data'].iloc[0], 50)
 
             # Last rank
-            rank_3_df = load_index_slice(index_meta, rank=3, num_ranks=num_ranks, num_nodes=1)
+            rank_3_df = load_index_partition(index_meta, rank=3, num_ranks=num_ranks, num_nodes=1)
             self.assertEqual(len(rank_3_df), 25)
             self.assertEqual(rank_3_df['data'].iloc[0], 75)
 

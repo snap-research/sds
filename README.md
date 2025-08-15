@@ -126,6 +126,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] An option for interleaved indexing.
 - [ ] Refresh index cache when restarting the dataloader? I.e. at least change the new size...
 - [ ] Re-opening __iter__ for multi-stream dataloader would break the synchronization of stream types.
+- [ ] Recompute sample_in_epoch based on the number of workers. I.e. sample_in_local_epoch => sample_in_global_epoch.
 
 ### TODOs for V2.5
 - [ ] SQLite index instead of parquet.

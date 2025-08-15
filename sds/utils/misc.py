@@ -1,7 +1,8 @@
 import math
 
-import numpy as np
 from beartype import beartype
+import numpy as np
+from loguru import logger
 
 #----------------------------------------------------------------------------
 # Shuffling utils.
@@ -32,6 +33,16 @@ def coprime_seed(seed: int, N: int) -> int:
     while math.gcd(a, N) != 1:
         a += 2
     return a % N
+
+@beartype
+def get_shuffled_sample_ids(num_samples: int, shuffle_seed: int | None, epoch: int, rank: int) -> list[int]:
+    # Creating a list of sample IDs to iterate over. Assuming that they will fit in memory.
+    sample_ids = list(range(num_samples))
+    if shuffle_seed is not None:
+        logger.debug(f"Shuffling sample IDs with seed {shuffle_seed} for worker {rank}.")
+        cur_seed = (shuffle_seed * 1_000_003 + epoch * 1_000_037 + rank * 1_000_039) % (2**32)
+        sample_ids = np.random.RandomState(cur_seed).permutation(sample_ids).tolist()
+    return sample_ids
 
 #----------------------------------------------------------------------------
 # Misc utils.

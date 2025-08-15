@@ -1,9 +1,15 @@
 import os
+import time
+from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.fs as fs
 import pandas as pd
 import polars as pl
+from tqdm import tqdm
 from loguru import logger
 
 #---------------------------------------------------------------------------
@@ -14,6 +20,7 @@ def read_parquet_slice(path: str, start_offset: int, end_offset: int, step: int=
     The path for step=1 is highly optimized to prevent reading unused row groups and to minimize memory allocations.
     """
     assert step >= 1, f"Step must be at least 1, got {step}."
+    start_time = time.time()
 
     if path.startswith("s3://"):
         fsys = fs.S3FileSystem(region=region)
@@ -79,6 +86,8 @@ def read_parquet_slice(path: str, start_offset: int, end_offset: int, step: int=
         return pa.Table.from_pylist([], schema=empty_schema).to_pandas()
 
     result_table = pa.concat_tables(tables_to_concat)
+    elapsed = time.time() - start_time
+    logger.debug(f"Read slice from {path} [{start_offset}:{end_offset}:{step}] in {elapsed:.2f} seconds, shape: {result_table.shape}")
     return result_table.to_pandas()
 
 
@@ -96,5 +105,57 @@ def save_polars_parquet(df: pd.DataFrame, dst: str, group_size: int = 100_000):
         df[col] = df[col].apply(lambda x: str(x) if isinstance(x, (float, int)) else x)  # Convert to string or None
     df_pl = pl.from_pandas(df)
     df_pl.write_parquet(dst, use_pyarrow=True, row_group_size=group_size)
+
+#---------------------------------------------------------------------------
+
+def read_parquet_num_rows(file_path: str, filesystem: fs.S3FileSystem) -> int:
+    """Synchronously reads a single Parquet file's metadata for its row count."""
+    return pq.read_metadata(file_path, filesystem=filesystem).num_rows
+
+def count_parquet_rows_in_s3(s3_path: str, verbose: bool = True) -> int:
+    """
+    Counts rows in S3 Parquet files using a thread pool for concurrency.
+
+    Args:
+        s3_path: The full S3 path (e.g., 's3://bucket/prefix/').
+        verbose: If True, enables debug logging and a progress bar.
+
+    Returns:
+        The cumulative row count.
+    """
+    s3_path = s3_path.replace('*.parquet', '')  # Remove wildcard if present
+    try:
+        parsed = urlparse(s3_path)
+        if parsed.scheme != 's3' or not parsed.netloc:
+            raise ValueError("Path must be a valid S3 URI (e.g., 's3://bucket/prefix').")
+        bucket, prefix = parsed.netloc, parsed.path.lstrip('/')
+    except ValueError as e:
+        logger.error(f"Invalid S3 path: {e}")
+        return 0
+
+    if verbose:
+        logger.debug(f"Finding files in {s3_path}...")
+
+    pa_fs = fs.S3FileSystem()
+    selector = fs.FileSelector(f"{bucket}/{prefix}", recursive=True)
+    file_infos = pa_fs.get_file_info(selector)
+    parquet_files = [f.path for f in file_infos if f.path.endswith(".parquet")]
+
+    assert len(parquet_files) > 0, f"No Parquet files found in {s3_path}."
+
+    if verbose:
+        logger.debug(f"Found {len(parquet_files)} Parquet files. Counting rows...")
+
+    with ThreadPoolExecutor() as executor:
+        # Pre-fill the `filesystem` argument for the worker function.
+        worker_func = partial(read_parquet_num_rows, filesystem=pa_fs)
+
+        # executor.map is a concise, parallel equivalent to a for-loop.
+        results = executor.map(worker_func, parquet_files)
+
+        if verbose:
+            results = tqdm(results, total=len(parquet_files), desc="Processing files")
+
+        return sum(results)
 
 #---------------------------------------------------------------------------
