@@ -14,9 +14,9 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import IterableDataset
 from loguru import logger
-import polars as pl
 
 from sds.downloader import ParallelDownloader
+from sds.lazy_thread_pool import LazyThreadPool
 from sds.structs import DataSampleType, SampleData, SampleTransform
 from sds.index import build_index, load_index_partition, load_index_row
 import sds.utils.distributed as dist_utils
@@ -108,7 +108,6 @@ class StreamingDataset(IterableDataset):
 
         self.build_index() # Build the index metadata. TODO: it's slow sometimes, so maybe we should to it lazily.
         self._index_partition = None # Index will be initialized in __iter__(), when we know the workers.
-        self.lazy_index: pl.LazyFrame = pl.scan_parquet(self.index_meta.path)
 
         self.downloader = self.init_downloader() # Initialize the downloader to download the shards in parallel.
 
@@ -206,7 +205,8 @@ class StreamingDataset(IterableDataset):
         Get sample by global index, blocking to download it.
         Note that for an intra-node index, we can only get samples from the current node-level partition only.
         """
-        sample_meta = self.lazy_index.slice(offset=sample_id, length=1).collect().to_pandas().iloc[0].to_dict()
+        # sample_meta = self.lazy_index.slice(offset=sample_id, length=1).collect().to_pandas().iloc[0].to_dict()
+        sample_meta = data_utils.read_parquet_slice(self.index_meta.path, start_offset=sample_id, end_offset=sample_id + 1, step=1).iloc[0].to_dict()
         total_size = self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=True)
         sample_meta[SAMPLE_DISK_USAGE_FIELD] = total_size
         # TODO: we need to store self._processed_sample_metas as an in-class property to be able to consider it for eviction.
@@ -356,16 +356,15 @@ class StreamingDataset(IterableDataset):
         else:
             # Lazily fetching a chunk from the partition.
             assert not self._interleaved_indexing, "Interleaved indexing is not supported for lazy indexing."
-            num_samples_per_worker = self.index_meta.num_samples // global_num_workers
-            num_chunks = (num_samples_per_worker + self._lazy_index_chunk_size - 1) // self._lazy_index_chunk_size
-            chunk_size_refined = math.floor(num_samples_per_worker / num_chunks)
-            chunk_ids = misc.get_shuffled_sample_ids(num_chunks, shuffle_seed=self.shuffle_seed, epoch=self.epoch, rank=global_worker_rank)
-            partition_start_sample_id = global_worker_rank * num_samples_per_worker
-            for chunk_id in chunk_ids:
-                start_sample_id = chunk_id * chunk_size_refined + partition_start_sample_id
-                end_sample_id = min(start_sample_id + chunk_size_refined, self.index_meta.num_samples)
-                # index_slice = data_utils.read_parquet_slice(self.index_meta.path, start_sample_id, end_sample_id, step=1)
-                index_slice = self.lazy_index.slice(start_sample_id, end_sample_id - start_sample_id).collect().to_pandas()
+            index_chunks_iter = LazyIndexIterator(
+                path=self.index_meta.path,
+                total_num_samples=self.index_meta.num_samples,
+                chunk_size=self._lazy_index_chunk_size,
+                shuffle_seed=self.shuffle_seed,
+                epoch=self.epoch,
+                num_threads=4,
+            )
+            for index_slice in index_chunks_iter:
                 yield from self._iter_slice_(index_slice, global_worker_rank, processed_sample_metas)
 
         logger.debug(f"Yielded {self.sample_in_epoch} samples in epoch {self.epoch}.")
@@ -401,5 +400,106 @@ def apply_transforms_recursively(sample: SampleData, transforms: list[SampleTran
     # Otherwise, it's a single sample.
     else:
         yield from apply_transforms_recursively(result, transforms[1:])
+
+
+class LazyIndexIterator:
+    """
+    An iterator that fetches chunks of a lazy index in parallel using a thread pool.
+
+    This class calculates the chunks of the index that belong to a specific worker
+    in a distributed environment, shuffles them, and then uses a background thread
+    pool to fetch the actual data for these chunks ahead of time.
+    """
+    def __init__(
+        self,
+        path: str, # Path to the index file.
+        total_num_samples: int,
+        chunk_size: int,
+        shuffle_seed: int,
+        epoch: int,
+        num_threads: int = 4,
+        prefetch_factor: int = 5,
+    ):
+        """
+        Initializes the iterator and schedules all chunk-fetching tasks.
+
+        Args:
+            path: Path to the index file.
+            total_num_samples: Total number of samples in the entire index.
+            chunk_size: The desired size of each index chunk.
+            global_worker_rank: The global_worker_rank of the current worker in distributed training.
+            global_num_workers: The total number of workers.
+            shuffle_seed: Seed for shuffling the order of chunks.
+            epoch: The current epoch number, used for shuffling.
+            num_threads: Number of worker threads to use for prefetching.
+            prefetch_factor: The number of chunks to prefetch per worker thread.
+        """
+        self.path = path
+        self._pool = LazyThreadPool(num_workers=num_threads, prefetch=num_threads * prefetch_factor)
+
+        # --- Calculate chunking for the current worker ---
+        global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
+        num_samples_per_worker = total_num_samples // global_num_workers
+        num_chunks = (num_samples_per_worker + chunk_size - 1) // chunk_size
+        self.chunk_size_refined = math.floor(num_samples_per_worker / num_chunks)
+        self.partition_start_sample_id = global_worker_rank * num_samples_per_worker
+
+        # --- Determine the order of chunks to process ---
+        chunk_ids = misc.get_shuffled_sample_ids(
+            num_chunks,
+            shuffle_seed=shuffle_seed,
+            epoch=epoch,
+            rank=global_worker_rank,
+        )
+
+        # --- Schedule all fetching tasks immediately ---
+        for chunk_id in chunk_ids:
+            start_sample_id = chunk_id * self.chunk_size_refined + self.partition_start_sample_id
+            end_sample_id = min(start_sample_id + self.chunk_size_refined, total_num_samples)
+
+            task_input = {'start': start_sample_id, 'end': end_sample_id}
+            self._pool.schedule_task(self._fetch_chunk, task_input)
+
+        # --- Prepare the generator for iteration ---
+        self._completed_task_generator = self._pool.yield_completed()
+
+    def _fetch_chunk(self, task_input: dict[str, int]) -> 'pd.DataFrame':
+        start_id = task_input['start']
+        end_id = task_input['end']
+        logger.debug(f"Fetching index chunk from {self.path} [{start_id}:{end_id}]")
+        index_slice = data_utils.read_parquet_slice(self.path, start_offset=start_id, end_offset=end_id, step=1)
+        logger.debug(f"Fetched index chunk from {self.path} [{start_id}:{end_id}], shape: {index_slice.shape}")
+        return index_slice
+
+    def __iter__(self) -> Iterator['pd.DataFrame']:
+        return self
+
+    def __next__(self) -> 'pd.DataFrame':
+        """
+        Returns the next prefetched index chunk.
+        Blocks until a chunk is available.
+        """
+        try:
+            task_result = next(self._completed_task_generator)
+            if task_result['success']:
+                return task_result['task_output']
+            else:
+                # Propagate the error from the worker thread to the main thread
+                # logger.error(f"Error prefetching index chunk for task {task_result['task_input']}: {task_result['error']}")
+                raise RuntimeError(f"Failed to prefetch index chunk: {task_result['error']}")
+        except StopIteration:
+            # All tasks are done, ensure the pool is shut down before we stop
+            self.shutdown()
+            raise
+
+    def shutdown(self):
+        if self._pool:
+            logger.debug("Shutting down LazyIndexIterator's thread pool.")
+            self._pool.shutdown()
+            self._pool = None
+
+    def __del__(self):
+        if hasattr(self, '_pool') and self._pool is not None:
+            self.shutdown()
 
 #----------------------------------------------------------------------------

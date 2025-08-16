@@ -99,7 +99,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
         src_ext = os_utils.file_ext(src).lower()
         assert src_ext == '.parquet' or not lazy, f"lazy is only supported for parquet files, got: {src_ext}."
         if lazy:
-            num_samples_total = pl.scan_parquet(src).select(pl.count()).collect().item()
+            num_samples_total = pl.scan_parquet(src, extra_columns='ignore').select(pl.count()).collect().item()
             num_samples_total = min(num_samples_total, max_size) if max_size is not None else num_samples_total
             return IndexMetaData(num_samples=num_samples_total, path=src, index_type=IndexType.INTER_NODE, lazy=True)
         else:
@@ -145,7 +145,7 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
 
     if lazy:
         assert src.endswith('.parquet'), f"lazy is only supported for parquet files, got: {src}."
-        num_samples_total = pl.scan_parquet(src).select(pl.count()).collect().item()
+        num_samples_total = pl.scan_parquet(src, extra_columns='ignore').select(pl.count()).collect().item()
         num_samples_total = min(num_samples_total, max_size) if max_size is not None else num_samples_total
         return IndexMetaData(num_samples=num_samples_total, path=src, index_type=index_type, lazy=True)
 
@@ -220,7 +220,7 @@ def load_index_row(index_meta: IndexMetaData, idx: int) -> pd.DataFrame:
     Loading just a single row from the index file.
     """
     assert index_meta.path.endswith('.parquet'), f"Index file must be a parquet file. Found: {index_meta.path}"
-    row_df = pl.scan_parquet(index_meta.path).slice(offset=idx, length=1).collect().to_pandas()
+    row_df = pl.scan_parquet(index_meta.path, extra_columns='ignore').slice(offset=idx, length=1).collect().to_pandas()
     return row_df
 
 
