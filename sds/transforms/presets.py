@@ -30,6 +30,10 @@ def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], a
                 assert len(sample[field]) > 0, f"Field '{field}' should not be an empty list in sample with keys {list(sample.keys())}."
             elif isinstance(sample[field], float):
                 assert not np.isnan(sample[field]), f"Field '{field}' should not be NaN in sample with keys {list(sample.keys())}."
+            elif isinstance(sample[field], dict):
+                assert len(sample[field]) > 0, f"Field '{field}' should not be an empty dictionary in sample with keys {list(sample.keys())}."
+            elif isinstance(sample[field], torch.Tensor):
+                assert not torch.isnan(sample[field]).any(), f"Field '{field}' should not contain NaN values in sample with keys {list(sample.keys())}."
         if isinstance(present, dict) and present[field] is not None:
             expected_type = present[field]
             assert isinstance(sample[field], expected_type), f"Field '{field}' should be of type {expected_type}, but got {type(sample[field])}."
