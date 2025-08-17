@@ -205,12 +205,12 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
 #---------------------------------------------------------------------------
 # Loading functions for an already created index.
 
-def load_index_partition(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int, interleaved: bool=False) -> pd.DataFrame:
+def load_index_partition(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int) -> pd.DataFrame:
     assert index_meta.path.endswith('.parquet'), f"Index file must be a parquet file. Found: {index_meta.path}"
     start_time = time.time()
-    start_idx, end_idx, step = compute_index_slice(index_meta, rank, num_ranks, num_nodes, interleaved=interleaved)
-    logger.debug(f"Loading index slice for rank {rank} (start_idx={start_idx}, end_idx={end_idx}, step={step}) from {index_meta.path} (interleaved={interleaved}).")
-    index_slice = data_utils.read_parquet_slice(index_meta.path, start_idx, end_idx, step=step)
+    start_idx, end_idx, _step = compute_index_slice(index_meta, rank, num_ranks, num_nodes)
+    logger.debug(f"Loading index slice for rank {rank} (start_idx={start_idx}, end_idx={end_idx}) from {index_meta.path}.")
+    index_slice = data_utils.read_parquet_slice(index_meta.path, start_idx, end_idx)
     logger.debug(f"Loaded index slice for rank {rank} with {len(index_slice):,} samples. Time taken: {time.time() - start_time:.2f} seconds.")
     return index_slice
 

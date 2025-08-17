@@ -57,7 +57,6 @@ class StreamingDataset(IterableDataset):
         num_random_access_retries: int=5, # The number of retries to access a sample by its index.
         print_exceptions: bool=False, # If True, print exceptions in the main thread.
         print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
-        interleaved_indexing: bool=False, # If True, use interleaved slicing between workers for the dataset. It's very inefficient for grouped parquet files.
         max_index_files_to_use: int | None=None, # If specified, use only the first N index files for the dataset. Useful for debugging or testing.
         lazy_index_chunk_size: int | None=None, # If positive, would only be reading `index_chunk_size` rows from the index file at a time. Also, won't load the whole index into memory.
 
@@ -83,7 +82,6 @@ class StreamingDataset(IterableDataset):
         self._disk_usage = 0 # Current cache usage in bytes.
         self._stored_sample_keys: deque[str] = deque() # A list of keys physicall stored on disk.
         self._allow_missing_columns = allow_missing_columns
-        self._interleaved_indexing = interleaved_indexing
         self._max_index_files_to_use = max_index_files_to_use
         self._lazy_index_chunk_size = lazy_index_chunk_size
 
@@ -206,7 +204,7 @@ class StreamingDataset(IterableDataset):
         Note that for an intra-node index, we can only get samples from the current node-level partition only.
         """
         # sample_meta = self.lazy_index.slice(offset=sample_id, length=1).collect().to_pandas().iloc[0].to_dict()
-        sample_meta = data_utils.read_parquet_slice(self.index_meta.path, start_offset=sample_id, end_offset=sample_id + 1, step=1).iloc[0].to_dict()
+        sample_meta = data_utils.read_parquet_slice(self.index_meta.path, start_offset=sample_id, end_offset=sample_id + 1).iloc[0].to_dict()
         total_size = self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=True)
         sample_meta[SAMPLE_DISK_USAGE_FIELD] = total_size
         # TODO: we need to store self._processed_sample_metas as an in-class property to be able to consider it for eviction.
@@ -315,8 +313,11 @@ class StreamingDataset(IterableDataset):
 
     def _iter_slice_(self, index_chunk: pd.DataFrame, global_worker_rank: int, processed_sample_metas: dict[str, dict[str, Any]]) -> Iterator[dict[str, Any]]:
         sample_ids: list[int] = misc.get_shuffled_sample_ids(len(index_chunk), shuffle_seed=self.shuffle_seed, epoch=self.epoch, rank=global_worker_rank)
-        schedule_start_sample_id: int = self.sample_in_epoch
-        self._schedule_downloads_(index_chunk, sample_ids, processed_sample_metas, start_id=schedule_start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
+        schedule_start_sample_id: int = 0 if self.index_meta.lazy else self.sample_in_epoch
+        num_scheduled = self._schedule_downloads_(index_chunk, sample_ids, processed_sample_metas, start_id=schedule_start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
+        if num_scheduled == 0:
+            logger.warning(f"No samples out of {len(index_chunk)} scheduled for download. Check the index size and columns.")
+            return
         schedule_start_sample_id += SCHEDULE_BATCH_SIZE
 
         for sample_key, total_sample_size in self.downloader.yield_completed_keys():
@@ -351,11 +352,10 @@ class StreamingDataset(IterableDataset):
         processed_sample_metas: dict[str, dict[str, Any]] = {}
         if not self.index_meta.lazy:
             if self._index_partition is None:
-                self._index_partition = load_index_partition(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes(), interleaved=self._interleaved_indexing)
+                self._index_partition = load_index_partition(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes())
             yield from self._iter_slice_(self._index_partition, global_worker_rank, processed_sample_metas)
         else:
             # Lazily fetching a chunk from the partition.
-            assert not self._interleaved_indexing, "Interleaved indexing is not supported for lazy indexing."
             index_chunks_iter = LazyIndexIterator(
                 path=self.index_meta.path,
                 total_num_samples=self.index_meta.num_samples,
@@ -438,18 +438,18 @@ class LazyIndexIterator:
         self._pool = LazyThreadPool(num_workers=num_threads, prefetch=num_threads * prefetch_factor)
 
         # --- Calculate chunking for the current worker ---
-        global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
-        num_samples_per_worker = total_num_samples // global_num_workers
+        self.global_worker_rank, self.global_num_workers = dist_utils.get_global_worker_info()
+        num_samples_per_worker = total_num_samples // self.global_num_workers
         num_chunks = (num_samples_per_worker + chunk_size - 1) // chunk_size
         self.chunk_size_refined = math.floor(num_samples_per_worker / num_chunks)
-        self.partition_start_sample_id = global_worker_rank * num_samples_per_worker
+        self.partition_start_sample_id = self.global_worker_rank * num_samples_per_worker
 
         # --- Determine the order of chunks to process ---
         chunk_ids = misc.get_shuffled_sample_ids(
             num_chunks,
             shuffle_seed=shuffle_seed,
             epoch=epoch,
-            rank=global_worker_rank,
+            rank=self.global_worker_rank,
         )
 
         # --- Schedule all fetching tasks immediately ---
@@ -463,12 +463,12 @@ class LazyIndexIterator:
         # --- Prepare the generator for iteration ---
         self._completed_task_generator = self._pool.yield_completed()
 
-    def _fetch_chunk(self, task_input: dict[str, int]) -> 'pd.DataFrame':
+    def _fetch_chunk(self, task_input: dict[str, int]) -> pd.DataFrame:
         start_id = task_input['start']
         end_id = task_input['end']
-        logger.debug(f"Fetching index chunk from {self.path} [{start_id}:{end_id}]")
-        index_slice = data_utils.read_parquet_slice(self.path, start_offset=start_id, end_offset=end_id, step=1)
-        logger.debug(f"Fetched index chunk from {self.path} [{start_id}:{end_id}], shape: {index_slice.shape}")
+        logger.debug(f"[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Fetching index chunk from {self.path} [{start_id}:{end_id}]")
+        index_slice = data_utils.read_parquet_slice(self.path, start_offset=start_id, end_offset=end_id)
+        logger.debug(f"[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Fetched index chunk from {self.path} [{start_id}:{end_id}], shape: {index_slice.shape}")
         return index_slice
 
     def __iter__(self) -> Iterator['pd.DataFrame']:

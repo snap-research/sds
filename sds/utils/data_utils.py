@@ -6,6 +6,7 @@ from functools import partial
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.dataset as ds
 import pyarrow.fs as fs
 import pandas as pd
 import polars as pl
@@ -23,7 +24,7 @@ def read_parquet_slice(path: str, start_offset: int, end_offset: int, step: int=
     start_time = time.time()
 
     if path.startswith("s3://"):
-        fsys = fs.S3FileSystem(region=region)
+        fsys = fs.S3FileSystem(region=region or os.environ.get("AWS_REGION"))
         path = path.replace("s3://", "")
     else:
         fsys = fs.LocalFileSystem()

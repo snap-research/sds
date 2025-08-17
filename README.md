@@ -127,6 +127,8 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Refresh index cache when restarting the dataloader? I.e. at least change the new size...
 - [ ] Re-opening __iter__ for multi-stream dataloader would break the synchronization of stream types.
 - [ ] Recompute sample_in_epoch based on the number of workers. I.e. sample_in_local_epoch => sample_in_global_epoch.
+- [ ] Lazy index does not work with sample_in_epoch.
+- [ ] We shouldn't need to reset the downloader after each iter_slice finish...
 
 ### TODOs for V2.5
 - [ ] SQLite index instead of parquet.
