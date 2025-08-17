@@ -483,12 +483,17 @@ class EnsureFieldsTransform:
     """
     A transform which checks that the values for given fields are not None or empty.
     """
-    def __init__(self, fields_whitelist: list[str] | dict[str, type], check_dummy_values: bool = False):
+    def __init__(self, fields_whitelist: list[str] | dict[str, type], check_dummy_values: bool = False, drop_others: bool=False):
         self.fields_whitelist = fields_whitelist
         self.check_dummy_values = check_dummy_values
+        self.drop_others = drop_others
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=self.fields_whitelist, absent=[], check_dummy_values=self.check_dummy_values)
+        if self.drop_others:
+            for field in list(sample.keys()):
+                if field not in self.fields_whitelist:
+                    del sample[field]
         return sample
 
 #----------------------------------------------------------------------------
