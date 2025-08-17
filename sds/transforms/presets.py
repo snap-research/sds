@@ -470,6 +470,24 @@ class ConvertDTypeTransform:
         sample[self.output_field] = sample[self.input_field].to(self.output_dtype)
         return sample
 
+@beartype
+class EnsureFieldsTransform:
+    """
+    A transform which checks that the values for given fields are not None or empty.
+    """
+    def __init__(self, fields_whitelist: list[str] | dict[str, type], remove_others: bool = False):
+        self.fields_whitelist = fields_whitelist
+        self.remove_others = remove_others
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=self.fields_whitelist, absent=[])
+        if self.remove_others:
+            # Remove all fields not in the whitelist
+            for field in list(sample.keys()):
+                if field not in self.fields_whitelist:
+                    del sample[field]
+        return sample
+
 #----------------------------------------------------------------------------
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
