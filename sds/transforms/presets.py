@@ -18,10 +18,18 @@ import sds.transforms.functional as SDF
 #----------------------------------------------------------------------------
 # Misc utils.
 
-def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], absent: list[str]) -> None:
+def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], absent: list[str], check_dummy_values: bool=False) -> None:
     """Validates that all present are present in the sample."""
     for field in present:
         assert field in sample, f"Field '{field}' not found in sample with keys {list(sample.keys())}."
+        if check_dummy_values:
+            assert sample[field] is not None, f"Field '{field}' should not be None in sample with keys {list(sample.keys())}."
+            if isinstance(sample[field], str):
+                assert sample[field] != '', f"Field '{field}' should not be an empty string in sample with keys {list(sample.keys())}."
+            elif isinstance(sample[field], list):
+                assert len(sample[field]) > 0, f"Field '{field}' should not be an empty list in sample with keys {list(sample.keys())}."
+            elif isinstance(sample[field], float):
+                assert not np.isnan(sample[field]), f"Field '{field}' should not be NaN in sample with keys {list(sample.keys())}."
         if isinstance(present, dict) and present[field] is not None:
             expected_type = present[field]
             assert isinstance(sample[field], expected_type), f"Field '{field}' should be of type {expected_type}, but got {type(sample[field])}."
@@ -475,17 +483,12 @@ class EnsureFieldsTransform:
     """
     A transform which checks that the values for given fields are not None or empty.
     """
-    def __init__(self, fields_whitelist: list[str] | dict[str, type], remove_others: bool = False):
+    def __init__(self, fields_whitelist: list[str] | dict[str, type], check_dummy_values: bool = False):
         self.fields_whitelist = fields_whitelist
-        self.remove_others = remove_others
+        self.check_dummy_values = check_dummy_values
 
     def __call__(self, sample: SampleData) -> SampleData:
-        _validate_fields(sample, present=self.fields_whitelist, absent=[])
-        if self.remove_others:
-            # Remove all fields not in the whitelist
-            for field in list(sample.keys()):
-                if field not in self.fields_whitelist:
-                    del sample[field]
+        _validate_fields(sample, present=self.fields_whitelist, absent=[], check_dummy_values=self.check_dummy_values)
         return sample
 
 #----------------------------------------------------------------------------
