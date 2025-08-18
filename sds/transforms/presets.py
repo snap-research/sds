@@ -129,6 +129,32 @@ class NormalizeFramesTransform(BaseTransform):
         sample[self.output_field] = sample[self.input_field].float() / 127.5 - 1.0  # Normalize to [-1, 1]
         return sample
 
+@beartype
+class UndistortFramesTransform(BaseTransform):
+    """
+    We have some broken distorted videos, so we should undistort them.
+    For this, we check for original_height/original_width vs height/width aspect ratio.
+    TODO: this transform should not exist... We should better fix the dataset...
+    """
+    def __init__(self, input_field: str, original_resolution_fields: tuple[str, str], output_field: str | None = None):
+        self.input_field = input_field
+        self.original_resolution_fields = original_resolution_fields
+        self.output_field = output_field if output_field is not None else input_field
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        orig_height, orig_width = sample.get(self.original_resolution_fields[0]), sample.get(self.original_resolution_fields[1])
+        if orig_height is None or orig_width is None:
+            return sample  # If original resolution is not provided, skip undistortion.
+        assert isinstance(orig_height, (int, float)) and isinstance(orig_width, (int, float)), \
+            f"Original resolution fields must be numeric, got {type(orig_height)} and {type(orig_width)}."
+        orig_aspect_ratio = orig_width / orig_height
+        cur_width, cur_height = sample[self.input_field][0].size
+        cur_aspect_ratio = cur_width / cur_height
+        if abs(orig_aspect_ratio - cur_aspect_ratio) > 0.02:  # Allow some tolerance
+            new_height = round(cur_width / orig_aspect_ratio)
+            sample[self.output_field] = SDF.lean_resize_frames(frames=sample[self.input_field], resolution=(new_height, cur_width))
+        return sample
+
 #----------------------------------------------------------------------------
 # Audio processing transforms.
 
@@ -514,6 +540,12 @@ class FindNonDummyValueTransform:
             reasons[field] = reason
         raise ValueError(f"All input fields are dummy. Reasons: {reasons}. Sample keys: {list(sample.keys())}.")
 
+@beartype
+class IdentityTransform:
+    """A no-op transform that simply returns the sample as is."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        return sample
+
 #----------------------------------------------------------------------------
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
@@ -589,6 +621,7 @@ def create_standard_video_pipeline(
     num_frames: int,
     decode_kwargs={}, # Extra decoding parameters for DecodeVideoTransform
     normalize: bool = False, # Whether to normalize the video frames to [-1, 1] range.
+    original_resolution_fields: tuple[str, str] | None = None, # If provided, will undistort the video frames based on original height/width.
     **resize_kwargs,
 ):
     """
@@ -597,6 +630,7 @@ def create_standard_video_pipeline(
     transforms: list[SampleTransform] = [
         RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
         DecodeVideoTransform(input_field='video', num_frames=num_frames, **decode_kwargs),
+        UndistortFramesTransform(input_field='video', original_resolution_fields=original_resolution_fields) if original_resolution_fields else IdentityTransform(),
         ResizeVideoTransform(input_field='video', **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field='video'),
     ]
