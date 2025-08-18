@@ -15,30 +15,6 @@ from PIL import Image
 from sds.structs import SampleData, SampleTransform
 import sds.transforms.functional as SDF
 
-#----------------------------------------------------------------------------
-# Misc utils.
-
-def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], absent: list[str], check_dummy_values: bool=False) -> None:
-    """Validates that all present are present in the sample."""
-    for field in present:
-        assert field in sample, f"Field '{field}' not found in sample with keys {list(sample.keys())}."
-        if check_dummy_values:
-            assert sample[field] is not None, f"Field '{field}' should not be None in sample with keys {list(sample.keys())}."
-            if isinstance(sample[field], str):
-                assert sample[field] != '', f"Field '{field}' should not be an empty string in sample with keys {list(sample.keys())}."
-            elif isinstance(sample[field], list):
-                assert len(sample[field]) > 0, f"Field '{field}' should not be an empty list in sample with keys {list(sample.keys())}."
-            elif isinstance(sample[field], float):
-                assert not np.isnan(sample[field]), f"Field '{field}' should not be NaN in sample with keys {list(sample.keys())}."
-            elif isinstance(sample[field], dict):
-                assert len(sample[field]) > 0, f"Field '{field}' should not be an empty dictionary in sample with keys {list(sample.keys())}."
-            elif isinstance(sample[field], torch.Tensor):
-                assert not torch.isnan(sample[field]).any(), f"Field '{field}' should not contain NaN values in sample with keys {list(sample.keys())}."
-        if isinstance(present, dict) and present[field] is not None:
-            expected_type = present[field]
-            assert isinstance(sample[field], expected_type), f"Field '{field}' should be of type {expected_type}, but got {type(sample[field])}."
-    for field in absent:
-        assert field not in sample, f"Field '{field}' should not be present in sample with keys {list(sample.keys())}."
 
 #----------------------------------------------------------------------------
 # Base transforms.
@@ -249,9 +225,29 @@ class DecodeVideoAndAudioTransform(BaseTransform):
 #----------------------------------------------------------------------------
 # Label/text/metadata processing transforms.
 
-def is_dummy_field(d: dict, field: str) -> bool:
+def is_dummy_field(d: dict, field: str, return_reason: bool=False) -> bool | tuple[bool, str]:
     """Checks if a field is dummy: absent, None, or an empty string."""
-    return field not in d or d[field] is None or d[field] == ''
+    is_dummy = False
+    reason = ""
+    if field not in d:
+        is_dummy = True
+        reason = f"Field '{field}' is absent."
+    elif d[field] is None:
+        is_dummy = True
+        reason = f"Field '{field}' is None."
+    elif isinstance(d[field], str) and d[field] == '':
+        is_dummy = True
+        reason = f"Field '{field}' is an empty string."
+    elif isinstance(d[field], (list, dict)) and len(d[field]) == 0:
+        is_dummy = True
+        reason = f"Field '{field}' is an empty {type(d[field]).__name__}."
+    elif isinstance(d[field], float) and np.isnan(d[field]):
+        is_dummy = True
+        reason = f"Field '{field}' is float and NaN."
+    elif isinstance(d[field], torch.Tensor) and torch.isnan(d[field]).any():
+        is_dummy = True
+        reason = f"Field '{field}' is a torch.Tensor and contains NaN values."
+    return (is_dummy, reason) if return_reason else is_dummy
 
 @beartype
 class TextEmbLoaderTransform:
@@ -500,6 +496,24 @@ class EnsureFieldsTransform:
                     del sample[field]
         return sample
 
+@beartype
+class FindNonDummyValueTransform:
+    """Searches over a given list of fields to find the very first non-dummy value."""
+    def __init__(self, input_fields: list[str], output_field: str):
+        assert len(input_fields) > 0, "At least one input field must be specified."
+        self.input_fields = input_fields
+        self.output_field = output_field
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        reasons = {}
+        for field in self.input_fields:
+            is_dummy, reason = is_dummy_field(sample, field, return_reason=True)
+            if not is_dummy:
+                sample[self.output_field] = sample[field]
+                return sample
+            reasons[field] = reason
+        raise ValueError(f"All input fields are dummy. Reasons: {reasons}. Sample keys: {list(sample.keys())}.")
+
 #----------------------------------------------------------------------------
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
@@ -645,5 +659,21 @@ def create_standard_image_latents_pipeline():
 @beartype
 def create_standard_video_latents_pipeline():
     raise NotImplementedError
+
+#----------------------------------------------------------------------------
+# Misc utils.
+
+def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], absent: list[str], check_dummy_values: bool=False) -> None:
+    """Validates that all present are present in the sample."""
+    for field in present:
+        assert field in sample, f"Field '{field}' not found in sample with keys {list(sample.keys())}."
+        if check_dummy_values:
+            is_dummy, reason = is_dummy_field(sample, field, return_reason=True)
+            assert not is_dummy, f"Field '{field}' is dummy: {reason} Sample keys: {list(sample.keys())}."
+        if isinstance(present, dict) and present[field] is not None:
+            expected_type = present[field]
+            assert isinstance(sample[field], expected_type), f"Field '{field}' should be of type {expected_type}, but got {type(sample[field])}."
+    for field in absent:
+        assert field not in sample, f"Field '{field}' should not be present in sample with keys {list(sample.keys())}."
 
 #----------------------------------------------------------------------------
