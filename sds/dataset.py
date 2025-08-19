@@ -447,16 +447,12 @@ class LazyIndexIterator:
             end_sample_id = min(start_sample_id + self.chunk_size_refined, total_num_samples)
             self._pool.schedule_task(self._fetch_chunk, task_input={'start': start_sample_id, 'end': end_sample_id})
 
-        # --- Prepare the generator for iteration ---
-        self._completed_task_generator = self._pool.yield_completed()
-
     def _fetch_chunk(self, task_input: dict[str, int]) -> pd.DataFrame:
         start_id = task_input['start']
         end_id = task_input['end']
         logger.debug(f"[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Fetching index chunk from {self.path} [{start_id}:{end_id}]")
         index_slice = data_utils.read_parquet_slice(self.path, start_offset=start_id, end_offset=end_id)
         index_slice = data_utils.maybe_run_sql_query_on_dataframe(index_slice, sql_query=self.sql_query)
-        assert not index_slice.empty, f"Index slice is empty for {self.path} [{start_id}:{end_id}]. Check the SQL query or the index file."
         logger.debug(f"[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Fetched index chunk from {self.path} [{start_id}:{end_id}], shape: {index_slice.shape}")
         return index_slice
 
@@ -466,12 +462,15 @@ class LazyIndexIterator:
     def __next__(self) -> pd.DataFrame:
         """Returns the next prefetched index chunk. Blocks until a chunk is available."""
         try:
-            task_result = next(self._completed_task_generator)
-            if task_result['success']:
-                return task_result['task_output']
-            else:
-                # Propagate the error from the worker thread to the main thread
-                raise RuntimeError(f"Failed to prefetch index chunk: {task_result['error']}")
+            for task_result in self._pool.yield_completed():
+                if task_result['success']:
+                    if task_result['task_output'].empty:
+                        logger.warning(f"Index slice is empty for {self.path} [{task_result['task_input']['start']}:{task_result['task_input']['end']}]. This might be due to an empty index or a SQL query that filtered out all rows.")
+                        continue
+                    return task_result['task_output']
+                else:
+                    # Propagate the error from the worker thread to the main thread
+                    raise RuntimeError(f"Failed to prefetch index chunk: {task_result['error']}")
         except StopIteration:
             # All tasks are done, ensure the pool is shut down before we stop
             self.shutdown()
