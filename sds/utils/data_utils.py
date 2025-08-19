@@ -161,17 +161,60 @@ def count_parquet_rows_in_s3(s3_path: str, verbose: bool = True) -> int:
         return sum(results)
 
 def maybe_run_sql_query_on_dataframe(df: pd.DataFrame, sql_query: str | None = None) -> pd.DataFrame:
+    """
+    Safely applies a SQL query to a pandas DataFrame using an isolated DuckDB connection.
+
+    This function is designed to be "fork-safe" and avoid deadlocks in multiprocessing
+    environments (e.g., Gunicorn, Celery) by creating a new, ephemeral DuckDB
+    connection for each call.
+
+    Args:
+        df: The input pandas DataFrame.
+        sql_query: The SQL query string to execute. The query must use the
+                   keyword 'dataframe' to refer to the DataFrame.
+
+    Returns:
+        A new pandas DataFrame containing the results of the query, or the
+        original DataFrame if sql_query is None.
+
+    Raises:
+        AssertionError: If inputs are invalid (not a DataFrame, query missing 'dataframe').
+        duckdb.Error: Propagates any errors from the DuckDB query execution.
+    """
     DATAFRAME_KEYWORD = 'dataframe'
+
+    # 1. Handle the case of no query
     if sql_query is None:
         return df
+
+    # 2. Perform original input validations
     assert isinstance(df, pd.DataFrame), f"SQL filtering is only supported for pandas DataFrames, got {type(df)}."
-    assert f' {DATAFRAME_KEYWORD} ' in sql_query, f"SQL query must contain ' {DATAFRAME_KEYWORD} ' to indicate the DataFrame to operate on. Got: {sql_query}"
-    assert len(sql_query.split(f' {DATAFRAME_KEYWORD} ')) == 2, f"SQL query must contain exactly one ' {DATAFRAME_KEYWORD} ' keyword. Got: {sql_query}"
+    assert DATAFRAME_KEYWORD in sql_query, f"SQL query must contain '{DATAFRAME_KEYWORD}' to indicate the DataFrame to operate on. Got: {sql_query}"
 
-    logger.debug(f"Running SQL query on DataFrame: {sql_query}. Shape before: {df.shape}")
-    duckdb.query(sql_query.replace(f' {DATAFRAME_KEYWORD} ', ' df ')).df()  # Apply SQL query to the DataFrame.
-    logger.debug(f"Shape after SQL query: {df.shape}")
+    logger.debug(f"Preparing to run SQL query. Shape before: {df.shape}")
+    logger.debug(f"Query: \"{sql_query}\"")
 
-    return df
+    result_df = None
+    try:
+        # 3. Create an isolated, in-memory connection.
+        # This is the key to being fork-safe. The connection exists only for this function call.
+        with duckdb.connect(database=':memory:', read_only=False) as con:
+            # 4. Execute the query. DuckDB's `query` method can automatically detect
+            # and use local variables (like `df`) if they are named in the query.
+            final_query = sql_query.replace(DATAFRAME_KEYWORD, 'df')
+
+            # The query is executed, and the result is immediately converted to a pandas DataFrame.
+            result_df = con.execute(final_query).df()
+    except duckdb.Error as e:
+        logger.error(f"A DuckDB error occurred while executing the query: {e}")
+        raise # Re-raise the exception to allow the calling code to handle the failure.
+    except Exception as e:
+        logger.error(f"An unexpected error occurred: {e}")
+        raise # Also re-raise unexpected errors.
+
+    logger.debug(f"Shape after SQL query: {result_df.shape}")
+
+    # 5. Return the new, transformed DataFrame
+    return result_df
 
 #---------------------------------------------------------------------------
