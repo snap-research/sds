@@ -10,6 +10,7 @@ import pyarrow.dataset as ds
 import pyarrow.fs as fs
 import pandas as pd
 import polars as pl
+import duckdb
 from tqdm import tqdm
 from loguru import logger
 
@@ -158,5 +159,19 @@ def count_parquet_rows_in_s3(s3_path: str, verbose: bool = True) -> int:
             results = tqdm(results, total=len(parquet_files), desc="Processing files")
 
         return sum(results)
+
+def maybe_run_sql_query_on_dataframe(df: pd.DataFrame, sql_query: str | None = None) -> pd.DataFrame:
+    DATAFRAME_KEYWORD = 'dataframe'
+    if sql_query is None:
+        return df
+    assert isinstance(df, pd.DataFrame), f"SQL filtering is only supported for pandas DataFrames, got {type(df)}."
+    assert f' {DATAFRAME_KEYWORD} ' in sql_query, f"SQL query must contain ' {DATAFRAME_KEYWORD} ' to indicate the DataFrame to operate on. Got: {sql_query}"
+    assert len(sql_query.split(f' {DATAFRAME_KEYWORD} ')) == 2, f"SQL query must contain exactly one ' {DATAFRAME_KEYWORD} ' keyword. Got: {sql_query}"
+
+    logger.debug(f"Running SQL query on DataFrame: {sql_query}. Shape before: {df.shape}")
+    duckdb.query(sql_query.replace(f' {DATAFRAME_KEYWORD} ', ' df ')).df()  # Apply SQL query to the DataFrame.
+    logger.debug(f"Shape after SQL query: {df.shape}")
+
+    return df
 
 #---------------------------------------------------------------------------

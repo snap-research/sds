@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import IterableDataset
 from loguru import logger
+import duckdb
 
 from sds.downloader import ParallelDownloader
 from sds.lazy_thread_pool import LazyThreadPool
@@ -59,6 +60,7 @@ class StreamingDataset(IterableDataset):
         print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
         max_index_files_to_use: int | None=None, # If specified, use only the first N index files for the dataset. Useful for debugging or testing.
         lazy_index_chunk_size: int | None=None, # If positive, would only be reading `index_chunk_size` rows from the index file at a time. Also, won't load the whole index into memory.
+        sql_query: str | None=None, # If specified, use the SQL query to filter/process the samples from the index file before downloading anything.
 
         # Some index optimization stuff.
         index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
@@ -84,6 +86,7 @@ class StreamingDataset(IterableDataset):
         self._allow_missing_columns = allow_missing_columns
         self._max_index_files_to_use = max_index_files_to_use
         self._lazy_index_chunk_size = lazy_index_chunk_size
+        self._sql_query = sql_query
 
         # Random access parameters.
         self._num_random_access_retries = num_random_access_retries
@@ -132,6 +135,7 @@ class StreamingDataset(IterableDataset):
                 cols_to_keep=self._index_cols_to_keep,
                 max_index_files_to_use=self._max_index_files_to_use,
                 lazy=self._lazy_index_chunk_size is not None and self._lazy_index_chunk_size > 0,
+                sql_query=self._sql_query,
             )
         else:
             logger.debug(f'Waiting on rank [{dist_utils.get_rank()}] for the index to be built.')
@@ -363,6 +367,8 @@ class StreamingDataset(IterableDataset):
                 shuffle_seed=self.shuffle_seed,
                 epoch=self.epoch,
                 num_threads=4,
+                prefetch_factor=5,
+                sql_query=self._sql_query,
             )
             for index_slice in index_chunks_iter:
                 yield from self._iter_slice_(index_slice, global_worker_rank, processed_sample_metas)
@@ -419,22 +425,10 @@ class LazyIndexIterator:
         epoch: int,
         num_threads: int = 4,
         prefetch_factor: int = 5,
+        sql_query: str | None = None, # SQL query to filter/process the index before fetching chunks.
     ):
-        """
-        Initializes the iterator and schedules all chunk-fetching tasks.
-
-        Args:
-            path: Path to the index file.
-            total_num_samples: Total number of samples in the entire index.
-            chunk_size: The desired size of each index chunk.
-            global_worker_rank: The global_worker_rank of the current worker in distributed training.
-            global_num_workers: The total number of workers.
-            shuffle_seed: Seed for shuffling the order of chunks.
-            epoch: The current epoch number, used for shuffling.
-            num_threads: Number of worker threads to use for prefetching.
-            prefetch_factor: The number of chunks to prefetch per worker thread.
-        """
         self.path = path
+        self.sql_query = sql_query
         self._pool = LazyThreadPool(num_workers=num_threads, prefetch=num_threads * prefetch_factor)
 
         # --- Calculate chunking for the current worker ---
@@ -445,20 +439,13 @@ class LazyIndexIterator:
         self.partition_start_sample_id = self.global_worker_rank * num_samples_per_worker
 
         # --- Determine the order of chunks to process ---
-        chunk_ids = misc.get_shuffled_sample_ids(
-            num_chunks,
-            shuffle_seed=shuffle_seed,
-            epoch=epoch,
-            rank=self.global_worker_rank,
-        )
+        chunk_ids = misc.get_shuffled_sample_ids(num_chunks, shuffle_seed=shuffle_seed, epoch=epoch, rank=self.global_worker_rank)
 
         # --- Schedule all fetching tasks immediately ---
         for chunk_id in chunk_ids:
             start_sample_id = chunk_id * self.chunk_size_refined + self.partition_start_sample_id
             end_sample_id = min(start_sample_id + self.chunk_size_refined, total_num_samples)
-
-            task_input = {'start': start_sample_id, 'end': end_sample_id}
-            self._pool.schedule_task(self._fetch_chunk, task_input)
+            self._pool.schedule_task(self._fetch_chunk, task_input={'start': start_sample_id, 'end': end_sample_id})
 
         # --- Prepare the generator for iteration ---
         self._completed_task_generator = self._pool.yield_completed()
@@ -468,24 +455,22 @@ class LazyIndexIterator:
         end_id = task_input['end']
         logger.debug(f"[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Fetching index chunk from {self.path} [{start_id}:{end_id}]")
         index_slice = data_utils.read_parquet_slice(self.path, start_offset=start_id, end_offset=end_id)
+        index_slice = data_utils.maybe_run_sql_query_on_dataframe(index_slice, sql_query=self.sql_query)
+        assert not index_slice.empty, f"Index slice is empty for {self.path} [{start_id}:{end_id}]. Check the SQL query or the index file."
         logger.debug(f"[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Fetched index chunk from {self.path} [{start_id}:{end_id}], shape: {index_slice.shape}")
         return index_slice
 
-    def __iter__(self) -> Iterator['pd.DataFrame']:
+    def __iter__(self) -> Iterator[pd.DataFrame]:
         return self
 
-    def __next__(self) -> 'pd.DataFrame':
-        """
-        Returns the next prefetched index chunk.
-        Blocks until a chunk is available.
-        """
+    def __next__(self) -> pd.DataFrame:
+        """Returns the next prefetched index chunk. Blocks until a chunk is available."""
         try:
             task_result = next(self._completed_task_generator)
             if task_result['success']:
                 return task_result['task_output']
             else:
                 # Propagate the error from the worker thread to the main thread
-                # logger.error(f"Error prefetching index chunk for task {task_result['task_input']}: {task_result['error']}")
                 raise RuntimeError(f"Failed to prefetch index chunk: {task_result['error']}")
         except StopIteration:
             # All tasks are done, ensure the pool is shut down before we stop
