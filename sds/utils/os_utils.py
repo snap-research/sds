@@ -93,8 +93,11 @@ def download_file(src: str, dst: str, skip_if_exists: bool, ignore_exceptions: b
 
     Returns True if an operation was performed, False if skipped.
     """
-    if skip_if_exists and is_non_empty_file(dst):
-        return True
+    if is_non_empty_file(dst):
+        if skip_if_exists:
+            return True
+        else:
+            os.remove(dst)
 
     try:
         CloudDownloader.get(src).direct_download(remote=src, local=dst)
