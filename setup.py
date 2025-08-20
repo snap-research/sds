@@ -22,8 +22,8 @@ except FileNotFoundError:
 
 setup(
     name="streaming-dataset",
-    version="0.1.0",
-    author="Ivan Skorokhodov",
+    version="0.2.0",
+    author="Snap",
     author_email="iskorokhodov@snap.com",
     description="Streaming Dataset library for PyTorch",
     long_description=long_description,

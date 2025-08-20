@@ -19,7 +19,7 @@ import duckdb
 from sds.downloader import ParallelDownloader
 from sds.lazy_thread_pool import LazyThreadPool
 from sds.structs import DataSampleType, SampleData, SampleTransform
-from sds.index import build_index, load_index_partition, load_index_row
+from sds.index import build_index, load_index_partition
 import sds.utils.distributed as dist_utils
 import sds.utils.os_utils as os_utils
 from sds.utils import data_utils
@@ -32,7 +32,7 @@ SAMPLE_DISK_USAGE_FIELD = '__disk_usage__' # The total size of the sample in byt
 PROCESSED_FIELD = '__is_processed__' # A flag to mark the sample as processed.
 SAMPLE_KEY_FIELD = '__sample_key__' # A key for the sample, corresponding to the index column value.
 DATA_TYPE_FIELD = '__data_type__' # The data type of the sample, e.g. 'csv', 'json', 'parquet', etc.
-SCHEDULE_BATCH_SIZE = 30_000 # The number of samples to schedule for download in one batch.
+SCHEDULE_BATCH_SIZE = 30_000 # The number of samples to schedule for download in one batch on each data worker.
 MIN_NUM_PENDING_TASKS_THRESH = 5_000
 
 #---------------------------------------------------------------------------
@@ -235,11 +235,10 @@ class StreamingDataset(IterableDataset):
 
         return downloading_result # Return smth meaningful only for blocking calls.
 
-    def _schedule_downloads_(self, index_chunk: pd.DataFrame, sample_ids: list[int], processed_sample_ids: dict[int, dict], start_id: int, num_to_schedule: int) -> int:
-        num_to_schedule: int = min(num_to_schedule, len(sample_ids) - start_id)
+    def _schedule_downloads_(self, index_chunk: pd.DataFrame, processed_sample_metas: dict[str, dict], shuffle_seed: int, epoch: int, global_worker_rank: int) -> int:
+        schedule_order = misc.get_shuffled_sample_ids(len(index_chunk), shuffle_seed=shuffle_seed, epoch=epoch, rank=global_worker_rank)
         num_scheduled: int = 0
-        for i in range(start_id, start_id + num_to_schedule):
-            sample_id = sample_ids[i]
+        for sample_id in schedule_order:
             sample_meta: dict[str, Any] = index_chunk.iloc[sample_id].to_dict()
             sample_key = sample_meta[self.index_col_name]
             try:
@@ -247,7 +246,7 @@ class StreamingDataset(IterableDataset):
                 num_scheduled += 1
             except Exception as e:
                 logger.error(f"Failed to schedule download for sample {sample_meta}: {e}")
-            processed_sample_ids[sample_key] = sample_meta  # Store the sample meta in the preallocated list.
+            processed_sample_metas[sample_key] = sample_meta  # Store the sample meta in the preallocated list.
         logger.debug(f"Scheduled {num_scheduled} samples for download with {self.downloader}.")
         return num_scheduled
 
@@ -315,14 +314,10 @@ class StreamingDataset(IterableDataset):
             self._disk_usage = 0
             self._stored_sample_keys.clear()
 
-    def _iter_slice_(self, index_chunk: pd.DataFrame, global_worker_rank: int, processed_sample_metas: dict[str, dict[str, Any]]) -> Iterator[dict[str, Any]]:
-        sample_ids: list[int] = misc.get_shuffled_sample_ids(len(index_chunk), shuffle_seed=self.shuffle_seed, epoch=self.epoch, rank=global_worker_rank)
-        schedule_start_sample_id: int = 0 if self.index_meta.lazy else self.sample_in_epoch
-        num_scheduled = self._schedule_downloads_(index_chunk, sample_ids, processed_sample_metas, start_id=schedule_start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
-        if num_scheduled == 0:
-            logger.warning(f"No samples out of {len(index_chunk)} scheduled for download. Check the index size and columns.")
-            return
-        schedule_start_sample_id += SCHEDULE_BATCH_SIZE
+    def _iter_chunks_(self, index_iterator: Iterator[pd.DataFrame], global_worker_rank: int, processed_sample_metas: dict[str, dict[str, Any]]) -> Iterator[dict[str, Any]]:
+        logger.debug(f'[rank {dist_utils.get_rank()} | worker_rank {global_worker_rank}/{dist_utils.get_world_size()}] Starting to iterate over the dataset {self.name} with {self.data_type} data type. Epoch: {self.epoch}, sample_in_epoch: {self.sample_in_epoch}.')
+        scheduling_kwargs = dict(processed_sample_metas=processed_sample_metas, shuffle_seed=self.shuffle_seed, epoch=self.epoch, global_worker_rank=global_worker_rank)
+        self._schedule_downloads_(next(index_iterator), **scheduling_kwargs)
 
         for sample_key, total_sample_size in self.downloader.yield_completed_keys():
             processed_sample_metas[sample_key][SAMPLE_DISK_USAGE_FIELD] = total_sample_size
@@ -339,14 +334,13 @@ class StreamingDataset(IterableDataset):
             self._maybe_evict_cold_samples(processed_sample_metas)
             self._gc.maybe_collect()
 
-            if schedule_start_sample_id < len(sample_ids) and self.downloader.get_num_pending_tasks() < MIN_NUM_PENDING_TASKS_THRESH:
-                # If we have less than MIN_NUM_PENDING_TASKS_THRESH pending tasks, schedule more.
-                self._schedule_downloads_(index_chunk, sample_ids, processed_sample_metas, start_id=schedule_start_sample_id, num_to_schedule=SCHEDULE_BATCH_SIZE)
-                schedule_start_sample_id += SCHEDULE_BATCH_SIZE
-
             # We need to increment the sample index regardless of whether the sample was processed successfully or not.
             # Otherwise, we would start at a much earlier actual sample id when loading the state dict.
             self.sample_in_epoch += 1
+
+            # If we have less than MIN_NUM_PENDING_TASKS_THRESH pending tasks, schedule more.
+            if self.downloader.get_num_pending_tasks() < MIN_NUM_PENDING_TASKS_THRESH and (next_index_chunk := next(index_iterator, None)) is not None:
+                self._schedule_downloads_(next_index_chunk, **scheduling_kwargs)
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         self._reset() # TODO: not sure if this resetting is correct...
@@ -354,59 +348,38 @@ class StreamingDataset(IterableDataset):
         global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
         self._maybe_init_worker_cache_limit(global_worker_rank, global_num_workers)
         processed_sample_metas: dict[str, dict[str, Any]] = {}
-        if not self.index_meta.lazy:
-            if self._index_partition is None:
-                self._index_partition = load_index_partition(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes())
-            yield from self._iter_slice_(self._index_partition, global_worker_rank, processed_sample_metas)
-        else:
-            # Lazily fetching a chunk from the partition.
-            index_chunks_iter = LazyIndexIterator(
+
+        if self.index_meta.lazy:
+            index_chunks_it = LazyIndexIterator(
                 path=self.index_meta.path,
                 total_num_samples=self.index_meta.num_samples,
                 chunk_size=self._lazy_index_chunk_size,
                 shuffle_seed=self.shuffle_seed,
                 epoch=self.epoch,
+                sample_in_epoch=self.sample_in_epoch,
                 num_threads=4,
                 prefetch_factor=5,
                 sql_query=self._sql_query,
             )
-            for index_slice in index_chunks_iter:
-                yield from self._iter_slice_(index_slice, global_worker_rank, processed_sample_metas)
+        else:
+            if self._index_partition is None:
+                self._index_partition = load_index_partition(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes())
+            index_chunks_it = lean_index_iterator(
+                self._index_partition, chunk_size=SCHEDULE_BATCH_SIZE, sample_in_epoch=self.sample_in_epoch,
+                shuffle_seed=self.shuffle_seed, epoch=self.epoch, rank=global_worker_rank)
+
+        yield from self._iter_chunks_(
+            index_iterator=index_chunks_it,
+            global_worker_rank=global_worker_rank,
+            processed_sample_metas=processed_sample_metas,
+        )
 
         logger.debug(f"Yielded {self.sample_in_epoch} samples in epoch {self.epoch}.")
         self.sample_in_epoch = 0  # Reset the sample index for the next epoch.
         self.epoch += 1 # TODO: this would be incrementing the epoch each time a new dataloader is called over the dataset, which is not good.
 
 #----------------------------------------------------------------------------
-
-def apply_transforms_recursively(sample: SampleData, transforms: list[SampleTransform]) -> Iterator[SampleData]:
-    """
-    Applies a list of transforms to a sample sequentially. A transform can return
-    a single sample or an iterator/generator of samples.
-    """
-    assert isinstance(sample, dict), f"Sample must be a dictionary, but got {type(sample)}."
-
-    # Base case: If there are no more transforms, yield the processed sample.
-    if not transforms:
-        yield sample
-        return
-
-    # Apply the current transform to the sample.
-    result = transforms[0](sample)
-
-    # The result might be a single new sample or a generator/iterator of new samples.
-    if isinstance(result, types.GeneratorType):
-        for processed_sample in result:
-            # For each sample yielded by the transform, apply the rest of the transforms.
-            yield from apply_transforms_recursively(processed_sample, transforms[1:])
-    # It might also be another iterable like a list, but not a dict (which is our sample type)
-    elif isinstance(result, (list, tuple)):
-        for processed_sample in result:
-             yield from apply_transforms_recursively(processed_sample, transforms[1:])
-    # Otherwise, it's a single sample.
-    else:
-        yield from apply_transforms_recursively(result, transforms[1:])
-
+# Index iteration utils.
 
 class LazyIndexIterator:
     """
@@ -423,6 +396,7 @@ class LazyIndexIterator:
         chunk_size: int,
         shuffle_seed: int,
         epoch: int,
+        sample_in_epoch: int = 0, # The sample index in the current epoch, used for slicing.
         num_threads: int = 4,
         prefetch_factor: int = 5,
         sql_query: str | None = None, # SQL query to filter/process the index before fetching chunks.
@@ -439,13 +413,16 @@ class LazyIndexIterator:
         self.partition_start_sample_id = self.global_worker_rank * num_samples_per_worker
 
         # --- Determine the order of chunks to process ---
-        chunk_ids = misc.get_shuffled_sample_ids(num_chunks, shuffle_seed=shuffle_seed, epoch=epoch, rank=self.global_worker_rank)
+        chunk_order = misc.get_shuffled_sample_ids(num_chunks, shuffle_seed=shuffle_seed, epoch=epoch, rank=self.global_worker_rank)
 
         # --- Schedule all fetching tasks immediately ---
-        for chunk_id in chunk_ids:
+        sample_offset = 0
+        for chunk_id in chunk_order:
             start_sample_id = chunk_id * self.chunk_size_refined + self.partition_start_sample_id
             end_sample_id = min(start_sample_id + self.chunk_size_refined, total_num_samples)
-            self._pool.schedule_task(self._fetch_chunk, task_input={'start': start_sample_id, 'end': end_sample_id})
+            sample_offset += end_sample_id - start_sample_id
+            if sample_offset >= sample_in_epoch: # Only schedule chunks that are after the current sample in the epoch.
+                self._pool.schedule_task(self._fetch_chunk, task_input={'start': start_sample_id, 'end': end_sample_id})
 
     def _fetch_chunk(self, task_input: dict[str, int]) -> pd.DataFrame:
         start_id = task_input['start']
@@ -485,5 +462,47 @@ class LazyIndexIterator:
     def __del__(self):
         if hasattr(self, '_pool') and self._pool is not None:
             self.shutdown()
+
+
+def lean_index_iterator(index: pd.DataFrame, chunk_size: int, sample_in_epoch: int, **shuffling_kwargs) -> Iterator[pd.DataFrame]:
+    """An iterator that yields index chunks one by one. Convenint for lean scheduling."""
+    sample_order = misc.get_shuffled_sample_ids(len(index), **shuffling_kwargs)
+    sample_order = sample_order[sample_in_epoch:]  # Skip samples that are already processed in the current epoch.
+    num_chunks = (len(sample_order) + chunk_size - 1) // chunk_size
+
+    for chunk_id in range(num_chunks):
+        cur_sample_ids = sample_order[chunk_id * chunk_size : (chunk_id + 1) * chunk_size]
+        yield index.iloc[cur_sample_ids]
+
+#----------------------------------------------------------------------------
+# Transforms utils.
+
+def apply_transforms_recursively(sample: SampleData, transforms: list[SampleTransform]) -> Iterator[SampleData]:
+    """
+    Applies a list of transforms to a sample sequentially. A transform can return
+    a single sample or an iterator/generator of samples.
+    """
+    assert isinstance(sample, dict), f"Sample must be a dictionary, but got {type(sample)}."
+
+    # Base case: If there are no more transforms, yield the processed sample.
+    if not transforms:
+        yield sample
+        return
+
+    # Apply the current transform to the sample.
+    result = transforms[0](sample)
+
+    # The result might be a single new sample or a generator/iterator of new samples.
+    if isinstance(result, types.GeneratorType):
+        for processed_sample in result:
+            # For each sample yielded by the transform, apply the rest of the transforms.
+            yield from apply_transforms_recursively(processed_sample, transforms[1:])
+    # It might also be another iterable like a list, but not a dict (which is our sample type)
+    elif isinstance(result, (list, tuple)):
+        for processed_sample in result:
+             yield from apply_transforms_recursively(processed_sample, transforms[1:])
+    # Otherwise, it's a single sample.
+    else:
+        yield from apply_transforms_recursively(result, transforms[1:])
 
 #----------------------------------------------------------------------------
