@@ -164,6 +164,7 @@ class MultiStreamDataLoader:
             self.streams.append(Stream(dataset=datasets[stream_idx], iterator=iterator, dataloader=dataloader, opts=opts))
 
         self._main_stream_idx = next(i for i, s in enumerate(self.streams) if s.opts.is_main) if any(s.opts.is_main for s in self.streams) else np.argmax(self.ratios)
+        self._num_batches_yielded = 0
 
     @staticmethod
     def split_across_consumers(ratios: list[float], total: int) -> list[int]:
@@ -191,7 +192,7 @@ class MultiStreamDataLoader:
         for s, state in zip(self.streams, state_dict['stream_states']):
             s.dataset.load_state_dict(state)
 
-    def _yield_batches_from_stream(self, stream_idx: int) -> Iterator[Batch]:
+    def _yield_batch_from_stream(self, stream_idx: int) -> Iterator[Batch]:
         # TODO: we assume that the batch is a dict and has already been collated.
         stream = self.streams[stream_idx]
         num_accum_rounds_left = stream.opts.num_accum_rounds
@@ -207,22 +208,22 @@ class MultiStreamDataLoader:
             )
 
     def __iter__(self) -> Any:
-        num_batches_yielded = 0
-
         while True:
             if self.schedule in [ScheduleType.CONSECUTIVE, ScheduleType.RANDOM_ORDER]:
-                cur_plan: list[int] = sum([[i] * c for i, c in enumerate(self.counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
+                cur_meta_iteration = self._num_batches_yielded // self.meta_iteration_size
+                cur_sub_iteration = self._num_batches_yielded % self.meta_iteration_size
+                # TODO: we shouldn't recreate the plan on each iteration, we can do this on each meta-iteration, but that makes that code a bit uglier...
+                cur_meta_iteration_order: list[int] = sum([[i] * c for i, c in enumerate(self.counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
                 if self.schedule == ScheduleType.RANDOM_ORDER:
-                    np.random.RandomState(num_batches_yielded + 1007 * self.shuffle_seed).shuffle(cur_plan)
-                for stream_idx in cur_plan:
-                    yield from self._yield_batches_from_stream(stream_idx)
-                    num_batches_yielded += 1
+                    np.random.RandomState(cur_meta_iteration + 1007 * self.shuffle_seed).shuffle(cur_meta_iteration_order)
+                stream_idx = cur_meta_iteration_order[cur_sub_iteration]
             elif self.schedule == ScheduleType.RANDOM:
-                stream_idx = np.random.RandomState(num_batches_yielded + 1007 * self.shuffle_seed).choice(len(self.streams), p=self.ratios)
-                yield from self._yield_batches_from_stream(stream_idx)
-                num_batches_yielded += 1
+                stream_idx = np.random.RandomState(self._num_batches_yielded + 1007 * self.shuffle_seed).choice(len(self.streams), p=self.ratios)
             else:
                 raise ValueError(f"Unsupported schedule: {self.schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'.")
+
+            yield from self._yield_batch_from_stream(stream_idx)
+            self._num_batches_yielded += 1
 
 #----------------------------------------------------------------------------
 # Helper dataloading functions.

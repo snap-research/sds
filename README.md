@@ -107,7 +107,6 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] There is no global shuffling right now, so smth like ImageNet training will be flawed.
 - [ ] Evict samples inside random access queries as well.
 - [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
-- [ ] Fix TODOs in the codebase.
 - [x] Remove logging calls from the codebase.
 - [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
 - [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
@@ -131,8 +130,10 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] We shouldn't need to reset the downloader after each iter_slice finish...
 - [ ] Deterministic order for the thread pool downloader.
 - [x] For lazy index, schedule next index chunk before the current one is finished.
+- [x] Make MultiStreamDataLoader robust to re-opening the iterator.
 
-### TODOs for V2.5
+### TODOs for v2.5
+- [ ] Fix TODOs in the codebase.
 - [ ] SQLite index instead of parquet.
 - [ ] Move synchronous batch-wise yielding to the `StreamingDataset` class using the round-robin assumption of torch dataloader iterating over workers.
 
