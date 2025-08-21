@@ -78,7 +78,7 @@ class ParallelDownloader:
 
     def wait_completion(self):
         self.thread_pool.wait_completion()
-        logger.debug(f"All download tasks completed. {self.thread_pool.num_tasks_completed} tasks completed out of {self.thread_pool.num_tasks_scheduled} scheduled.")
+        logger.debug(f"All download tasks completed. {self.thread_pool.num_tasks_succeeded} tasks completed out of {self.thread_pool.num_tasks_scheduled} scheduled.")
 
     def stop(self):
         self.thread_pool.stop()

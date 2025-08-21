@@ -71,7 +71,7 @@ def mock_env():
         'image.jpg': [f'/fake/src/path/image_{i}.jpg' for i in range(10)],
         'label.txt': [f'/fake/src/path/label_{i}.txt' for i in range(10)],
     })
-    mock_sds_index.load_index_slice.return_value = mock_index_df
+    mock_sds_index.load_index_partition.return_value = mock_index_df
     mock_sds_index.load_index_row.return_value = mock_index_df.iloc[0]
 
 
@@ -190,7 +190,7 @@ def test_iteration_flow(mock_env, dataset_class):
          with patch('builtins.open', side_effect=file_open_side_effect):
             items = list(dataset)
 
-    mock_sds_index.load_index_slice.assert_called_once()
+    mock_sds_index.load_index_partition.assert_called_once()
     assert mock_downloader_instance.schedule_task.call_count == len(mock_env["mock_index_df"])
 
     # The stop() method is called at the beginning of the *next* iteration to clean up,

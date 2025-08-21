@@ -41,10 +41,11 @@ class IndexMetaData:
     num_samples: int
     path: str
     index_type: IndexType # This affects how we slice the data across nodes and ranks.
+    lazy: bool = False # Whether the index is lazy-loaded or not. If True, the index will be loaded only when needed.
 
 #---------------------------------------------------------------------------
 
-def build_index(src: str, dst_dir: str, data_type: DataSampleType, max_index_files_to_use: int | None=None, **kwargs) -> IndexMetaData:
+def build_index(src: str, dst_dir: str, data_type: DataSampleType, max_index_files_to_use: int | None=None, lazy: bool=False, **kwargs) -> IndexMetaData:
     """
     This function builds an index (as pandas dataframe) of the dataset to load.
     Then it saves it (or its chunk) on the local disk as parquet for all the ranks to access.
@@ -67,25 +68,28 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, max_index_fil
     src_ext = os_utils.file_ext(src).lower()
 
     if src.endswith('/split_file_paths.txt') or src.endswith(f'*{src_ext}'):
-        return build_index_from_many_index_files(src, dst_dir, max_index_files_to_use=max_index_files_to_use, **kwargs)
+        return build_index_from_many_index_files(src, dst_dir, max_index_files_to_use=max_index_files_to_use, lazy=lazy, **kwargs)
     elif any(src.endswith(ext) for ext in ['.csv', '.json', '.parquet']): # TODO: process parquet data more intelligently via slicing.
-        return build_index_from_index_file(src, dst_dir, **kwargs)
+        assert max_index_files_to_use is None, f"max_index_files_to_use is not supported for folder datasets. Got {max_index_files_to_use}."
+        return build_index_from_index_file(src, dst_dir, lazy=lazy, **kwargs)
     else:
         files_list = os_utils.find_files_in_src(src)
         assert files_list, f"No files found in the source {src} for data type {data_type}."
+        assert not lazy, f"lazy is not supported for folder datasets. Got {lazy}."
+        assert max_index_files_to_use is None, f"max_index_files_to_use is not supported for folder datasets. Got {max_index_files_to_use}."
         return build_index_from_files_list(files_list, data_type=data_type, dst_dir=dst_dir, **kwargs)
 
 
-def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int, max_size: int=None, cols_to_keep: list[str] | None=None, max_index_files_to_use: int | None=None) -> IndexMetaData:
+def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int, max_size: int=None, lazy: bool=False, max_index_files_to_use: int | None=None, **slicing_kwargs) -> IndexMetaData:
     """
     This function builds an index from either `split_file_paths.txt` list or wildcard path (e.g., 's3://bucket/path/*.csv').
     It's an intra-node index, meaning that each node will process its own subset of data.
     """
-    index_type = IndexType.INTRA_NODE
     # We are processing a list of CSV/JSON/PARQUET files (possibly stored in S3).
     if src.endswith('/split_file_paths.txt'):
         # That's a special case: we receive a file containing a list of index paths, one per line.
         # Let's load it, read and distribute the data across ranks.
+        assert not lazy, f"lazy is not supported for split_file_paths.txt. Got {lazy}."
         dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, 'split_file_paths.txt')
         CloudDownloader.get(src).direct_download(remote=src, local=dst)
         with open(dst, 'r') as f:
@@ -93,7 +97,13 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     else:
         # Index files are passed as a wildcard path (e.g., 's3://bucket/path/*.csv'). Let's find them all.
         src_ext = os_utils.file_ext(src).lower()
-        index_files_list = sorted(os_utils.find_files_in_src(src.replace(f'*{src_ext}', ''), exts={src_ext})) # Remove the wildcard from the src path.
+        assert src_ext == '.parquet' or not lazy, f"lazy is only supported for parquet files, got: {src_ext}."
+        if lazy:
+            num_samples_total = pl.scan_parquet(src, extra_columns='ignore').select(pl.count()).collect().item()
+            num_samples_total = min(num_samples_total, max_size) if max_size is not None else num_samples_total
+            return IndexMetaData(num_samples=num_samples_total, path=src, index_type=IndexType.INTER_NODE, lazy=True)
+        else:
+            index_files_list = sorted(os_utils.find_files_in_src(src.replace(f'*{src_ext}', ''), exts={src_ext})) # Remove the wildcard from the src path.
 
     assert len(index_files_list) > 0, f"No index files found in the source {src}. Please provide a valid source path or URL with index files."
     assert max_index_files_to_use != 0, f"max_index_files_to_use must be greater than 0 or be None, got {max_index_files_to_use}."
@@ -118,9 +128,10 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     dfs = load_index_files(node_files_list, dst_dir, already_loaded=cur_dfs)
     assert len(dfs) > 0, f"Failed to load any index files for the current node. Files: {node_files_list}. This is likely an SDS bug, and we have a problem with data processing."
 
+    index_type = IndexType.INTRA_NODE
     df = pd.concat([dfs[f].iloc[slice_bounds[f][0]:slice_bounds[f][1]] for f in dfs], ignore_index=True)
     df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
+    df = maybe_slice_df(df, max_size, index_type, **slicing_kwargs)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     logger.debug(f"[Node {node_rank}] Saving the index to {index_dst} with {len(df):,} samples...")
     data_utils.save_polars_parquet(df, index_dst)
@@ -129,8 +140,15 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     return index_meta
 
 
-def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, max_size: int=None, cols_to_keep: list[str] | None=None) -> IndexMetaData:
+def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, max_size: int=None, lazy: bool=False, **slicing_kwargs) -> IndexMetaData:
     index_type = IndexType.INTER_NODE
+
+    if lazy:
+        assert src.endswith('.parquet'), f"lazy is only supported for parquet files, got: {src}."
+        num_samples_total = pl.scan_parquet(src, extra_columns='ignore').select(pl.count()).collect().item()
+        num_samples_total = min(num_samples_total, max_size) if max_size is not None else num_samples_total
+        return IndexMetaData(num_samples=num_samples_total, path=src, index_type=index_type, lazy=True)
+
     # We have just a single index file which contains all the data samples metadata.
     # First, download the file to the destination directory.
     dst = os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os_utils.path_key(src))  # Use the path key to avoid conflicts.
@@ -143,7 +161,7 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
         logger.debug(f"Converting the index file from PyArrow Table to pandas DataFrame...")
         df = df.to_pandas()
     df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
+    df = maybe_slice_df(df, max_size, index_type, **slicing_kwargs)
     assert isinstance(df, pd.DataFrame), f"Expected a DataFrame, got {type(df)} from {src}."
 
     # Now, we can save it as a parquet file for easier slicing.
@@ -154,7 +172,7 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
     return IndexMetaData(len(df), index_dst, index_type)
 
 
-def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType, shuffle_seed: int=None, max_size: int=None, cols_to_keep: list[str] | None=None) -> IndexMetaData:
+def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType, shuffle_seed: int=None, max_size: int=None, **slicing_kwargs) -> IndexMetaData:
     index_type = IndexType.INTER_NODE
     main_files = [f for f in files_list if os_utils.file_ext(f).lower() in DATA_TYPE_TO_EXT[data_type]]
     assert len(main_files) > 0, f"Didnt find any {data_type} files (used extensions: {DATA_TYPE_TO_EXT[data_type]})."
@@ -177,7 +195,7 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
     INDEX_COL_NAME = 'index'
     df = pd.DataFrame.from_dict(data, orient='index').reset_index(names=INDEX_COL_NAME).sort_values(by=INDEX_COL_NAME)
     df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type, cols_to_keep=cols_to_keep)
+    df = maybe_slice_df(df, max_size, index_type, **slicing_kwargs)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     data_utils.save_polars_parquet(df, index_dst)
     index_meta = IndexMetaData(len(df), index_dst, index_type)
@@ -187,12 +205,12 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
 #---------------------------------------------------------------------------
 # Loading functions for an already created index.
 
-def load_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int, interleaved: bool=False) -> pd.DataFrame:
+def load_index_partition(index_meta: IndexMetaData, rank: int, num_ranks: int, num_nodes: int) -> pd.DataFrame:
     assert index_meta.path.endswith('.parquet'), f"Index file must be a parquet file. Found: {index_meta.path}"
     start_time = time.time()
-    start_idx, end_idx, step = compute_index_slice(index_meta, rank, num_ranks, num_nodes, interleaved=interleaved)
-    logger.debug(f"Loading index slice for rank {rank} (start_idx={start_idx}, end_idx={end_idx}, step={step}) from {index_meta.path} (interleaved={interleaved}).")
-    index_slice = data_utils.read_parquet_slice(index_meta.path, start_idx, end_idx, step=step)
+    start_idx, end_idx, _step = compute_index_slice(index_meta, rank, num_ranks, num_nodes)
+    logger.debug(f"Loading index slice for rank {rank} (start_idx={start_idx}, end_idx={end_idx}) from {index_meta.path}.")
+    index_slice = data_utils.read_parquet_slice(index_meta.path, start_idx, end_idx)
     logger.debug(f"Loaded index slice for rank {rank} with {len(index_slice):,} samples. Time taken: {time.time() - start_time:.2f} seconds.")
     return index_slice
 
@@ -202,7 +220,7 @@ def load_index_row(index_meta: IndexMetaData, idx: int) -> pd.DataFrame:
     Loading just a single row from the index file.
     """
     assert index_meta.path.endswith('.parquet'), f"Index file must be a parquet file. Found: {index_meta.path}"
-    row_df = pl.scan_parquet(index_meta.path).slice(offset=idx, length=1).collect().to_pandas()
+    row_df = pl.scan_parquet(index_meta.path, extra_columns='ignore').slice(offset=idx, length=1).collect().to_pandas()
     return row_df
 
 
@@ -230,6 +248,7 @@ def compute_index_slice(index_meta: IndexMetaData, rank: int, num_ranks: int, nu
 #---------------------------------------------------------------------------
 # Miscellaneous transforms.
 
+@beartype
 def maybe_shuffle_df(df: pd.DataFrame, shuffle_seed: int | None) -> pd.DataFrame:
     """
     Shuffle the DataFrame if a shuffle seed is provided.
@@ -240,10 +259,12 @@ def maybe_shuffle_df(df: pd.DataFrame, shuffle_seed: int | None) -> pd.DataFrame
     return df
 
 
-def maybe_slice_df(df: pd.DataFrame, max_size: int | None, index_type, cols_to_keep: list[str] | None=None) -> pd.DataFrame:
+@beartype
+def maybe_slice_df(df: pd.DataFrame, max_size: int | None, index_type, cols_to_keep: list[str] | None=None, sql_query: str | None=None) -> pd.DataFrame:
     """
     Slice the DataFrame to a maximum size if specified.
     """
+    df = data_utils.maybe_run_sql_query_on_dataframe(df, sql_query)
     if max_size is None:
         return df
     max_size = (max_size // dist_utils.get_num_nodes()) if index_type == IndexType.INTRA_NODE else max_size

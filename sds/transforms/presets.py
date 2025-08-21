@@ -15,18 +15,6 @@ from PIL import Image
 from sds.structs import SampleData, SampleTransform
 import sds.transforms.functional as SDF
 
-#----------------------------------------------------------------------------
-# Misc utils.
-
-def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], absent: list[str]) -> None:
-    """Validates that all present are present in the sample."""
-    for field in present:
-        assert field in sample, f"Field '{field}' not found in sample with keys {list(sample.keys())}."
-        if isinstance(present, dict) and present[field] is not None:
-            expected_type = present[field]
-            assert isinstance(sample[field], expected_type), f"Field '{field}' should be of type {expected_type}, but got {type(sample[field])}."
-    for field in absent:
-        assert field not in sample, f"Field '{field}' should not be present in sample with keys {list(sample.keys())}."
 
 #----------------------------------------------------------------------------
 # Base transforms.
@@ -141,6 +129,32 @@ class NormalizeFramesTransform(BaseTransform):
         sample[self.output_field] = sample[self.input_field].float() / 127.5 - 1.0  # Normalize to [-1, 1]
         return sample
 
+@beartype
+class UndistortFramesTransform(BaseTransform):
+    """
+    We have some broken distorted videos, so we should undistort them.
+    For this, we check for original_height/original_width vs height/width aspect ratio.
+    TODO: this transform should not exist... We should better fix the dataset...
+    """
+    def __init__(self, input_field: str, original_resolution_fields: tuple[str, str], output_field: str | None = None):
+        self.input_field = input_field
+        self.original_resolution_fields = original_resolution_fields
+        self.output_field = output_field if output_field is not None else input_field
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        orig_height, orig_width = sample.get(self.original_resolution_fields[0]), sample.get(self.original_resolution_fields[1])
+        if orig_height is None or orig_width is None:
+            return sample  # If original resolution is not provided, skip undistortion.
+        assert isinstance(orig_height, (int, float)) and isinstance(orig_width, (int, float)), \
+            f"Original resolution fields must be numeric, got {type(orig_height)} and {type(orig_width)}."
+        orig_aspect_ratio = orig_width / orig_height
+        cur_width, cur_height = sample[self.input_field][0].size
+        cur_aspect_ratio = cur_width / cur_height
+        if abs(orig_aspect_ratio - cur_aspect_ratio) > 0.02:  # Allow some tolerance
+            new_height = round(cur_width / orig_aspect_ratio)
+            sample[self.output_field] = SDF.lean_resize_frames(frames=sample[self.input_field], resolution=(new_height, cur_width))
+        return sample
+
 #----------------------------------------------------------------------------
 # Audio processing transforms.
 
@@ -237,9 +251,29 @@ class DecodeVideoAndAudioTransform(BaseTransform):
 #----------------------------------------------------------------------------
 # Label/text/metadata processing transforms.
 
-def is_dummy_field(d: dict, field: str) -> bool:
+def is_dummy_field(d: dict, field: str, return_reason: bool=False) -> bool | tuple[bool, str]:
     """Checks if a field is dummy: absent, None, or an empty string."""
-    return field not in d or d[field] is None or d[field] == ''
+    is_dummy = False
+    reason = ""
+    if field not in d:
+        is_dummy = True
+        reason = f"Field '{field}' is absent."
+    elif d[field] is None:
+        is_dummy = True
+        reason = f"Field '{field}' is None."
+    elif isinstance(d[field], str) and d[field] == '':
+        is_dummy = True
+        reason = f"Field '{field}' is an empty string."
+    elif isinstance(d[field], (list, dict)) and len(d[field]) == 0:
+        is_dummy = True
+        reason = f"Field '{field}' is an empty {type(d[field]).__name__}."
+    elif isinstance(d[field], float) and np.isnan(d[field]):
+        is_dummy = True
+        reason = f"Field '{field}' is float and NaN."
+    elif isinstance(d[field], torch.Tensor) and torch.isnan(d[field]).any():
+        is_dummy = True
+        reason = f"Field '{field}' is a torch.Tensor and contains NaN values."
+    return (is_dummy, reason) if return_reason else is_dummy
 
 @beartype
 class TextEmbLoaderTransform:
@@ -470,6 +504,48 @@ class ConvertDTypeTransform:
         sample[self.output_field] = sample[self.input_field].to(self.output_dtype)
         return sample
 
+@beartype
+class EnsureFieldsTransform:
+    """
+    A transform which checks that the values for given fields are not None or empty.
+    """
+    def __init__(self, fields_whitelist: list[str] | dict[str, type], check_dummy_values: bool = False, drop_others: bool=False):
+        self.fields_whitelist = fields_whitelist
+        self.check_dummy_values = check_dummy_values
+        self.drop_others = drop_others
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=self.fields_whitelist, absent=[], check_dummy_values=self.check_dummy_values)
+        if self.drop_others:
+            for field in list(sample.keys()):
+                if field not in self.fields_whitelist:
+                    del sample[field]
+        return sample
+
+@beartype
+class FindNonDummyValueTransform:
+    """Searches over a given list of fields to find the very first non-dummy value."""
+    def __init__(self, input_fields: list[str], output_field: str):
+        assert len(input_fields) > 0, "At least one input field must be specified."
+        self.input_fields = input_fields
+        self.output_field = output_field
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        reasons = {}
+        for field in self.input_fields:
+            is_dummy, reason = is_dummy_field(sample, field, return_reason=True)
+            if not is_dummy:
+                sample[self.output_field] = sample[field]
+                return sample
+            reasons[field] = reason
+        raise ValueError(f"All input fields are dummy. Reasons: {reasons}. Sample keys: {list(sample.keys())}.")
+
+@beartype
+class IdentityTransform:
+    """A no-op transform that simply returns the sample as is."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        return sample
+
 #----------------------------------------------------------------------------
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
@@ -545,6 +621,7 @@ def create_standard_video_pipeline(
     num_frames: int,
     decode_kwargs={}, # Extra decoding parameters for DecodeVideoTransform
     normalize: bool = False, # Whether to normalize the video frames to [-1, 1] range.
+    original_resolution_fields: tuple[str, str] | None = None, # If provided, will undistort the video frames based on original height/width.
     **resize_kwargs,
 ):
     """
@@ -553,6 +630,7 @@ def create_standard_video_pipeline(
     transforms: list[SampleTransform] = [
         RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
         DecodeVideoTransform(input_field='video', num_frames=num_frames, **decode_kwargs),
+        UndistortFramesTransform(input_field='video', original_resolution_fields=original_resolution_fields) if original_resolution_fields else IdentityTransform(),
         ResizeVideoTransform(input_field='video', **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field='video'),
     ]
@@ -615,5 +693,21 @@ def create_standard_image_latents_pipeline():
 @beartype
 def create_standard_video_latents_pipeline():
     raise NotImplementedError
+
+#----------------------------------------------------------------------------
+# Misc utils.
+
+def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], absent: list[str], check_dummy_values: bool=False) -> None:
+    """Validates that all present are present in the sample."""
+    for field in present:
+        assert field in sample, f"Field '{field}' not found in sample with keys {list(sample.keys())}."
+        if check_dummy_values:
+            is_dummy, reason = is_dummy_field(sample, field, return_reason=True)
+            assert not is_dummy, f"Field '{field}' is dummy: {reason} Sample keys: {list(sample.keys())}."
+        if isinstance(present, dict) and present[field] is not None:
+            expected_type = present[field]
+            assert isinstance(sample[field], expected_type), f"Field '{field}' should be of type {expected_type}, but got {type(sample[field])}."
+    for field in absent:
+        assert field not in sample, f"Field '{field}' should not be present in sample with keys {list(sample.keys())}."
 
 #----------------------------------------------------------------------------

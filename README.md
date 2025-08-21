@@ -107,7 +107,6 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] There is no global shuffling right now, so smth like ImageNet training will be flawed.
 - [ ] Evict samples inside random access queries as well.
 - [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
-- [ ] Fix TODOs in the codebase.
 - [x] Remove logging calls from the codebase.
 - [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
 - [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
@@ -121,13 +120,21 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Missing fields should be populated in the dataloader or index meta or where? (I guess, they should automatically be filled with `None` in the index).
 - [x] Re-slice indicies based on sample counts and number of nodes.
 - [ ] Cache index: save to "cache" on S3 and load from cache (if present). Basically, if we are given a folder or split_file_paths.txt or *.csv, then we could save the index normally (though we should be careful about single-node vs multi-node cases).
-- [ ] VAE latents loading.
+- [x] VAE latents loading.
 - [ ] Video + .wav files loading (now we only support video files with embedded audio).
 - [x] An option for interleaved indexing.
 - [ ] Refresh index cache when restarting the dataloader? I.e. at least change the new size...
 - [ ] Re-opening __iter__ for multi-stream dataloader would break the synchronization of stream types.
+- [ ] Recompute sample_in_epoch based on the number of workers. I.e. sample_in_local_epoch => sample_in_global_epoch.
+- [x] Lazy index does not work with sample_in_epoch.
+- [x] We shouldn't need to reset the downloader after each iter_slice finish...
+- [ ] Deterministic order for the thread pool downloader.
+- [x] For lazy index, schedule next index chunk before the current one is finished.
+- [x] Make MultiStreamDataLoader robust to re-opening the iterator.
+- [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 
-### TODOs for V2.5
+### TODOs for v2.5
+- [ ] Fix TODOs in the codebase.
 - [ ] SQLite index instead of parquet.
 - [ ] Move synchronous batch-wise yielding to the `StreamingDataset` class using the round-robin assumption of torch dataloader iterating over workers.
 

@@ -114,7 +114,7 @@ def test_progress_tracking():
     progress = pool.progress()
 
     assert progress["num_tasks_scheduled"] == 2
-    assert progress["num_tasks_completed"] == len(succeeded) == 1
+    assert progress["num_tasks_succeeded"] == len(succeeded) == 1
 
 
 def test_prefetch_limit_enforced():
@@ -142,7 +142,7 @@ def test_prefetch_limit_enforced():
         assert pool.completed_queue.qsize() == 0 # Internal check: queue should be drained
 
     # After all, total completed should match total scheduled
-    assert pool.progress()["num_tasks_completed"] == total_tasks
+    assert pool.progress()["num_tasks_succeeded"] == total_tasks
     pool.shutdown()
 
     # Optional: check that all results were received
@@ -164,7 +164,7 @@ def test_threadpool_no_memory_leak():
         pool = LazyThreadPool(num_workers=4, prefetch=10)
         for i in range(100):
             pool.schedule_task(short_task, task_input=i)
-        while pool.progress()["num_tasks_completed"] < 100:
+        while pool.progress()["num_tasks_succeeded"] < 100:
             list(pool.yield_completed())
         pool.shutdown()
 

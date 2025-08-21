@@ -84,7 +84,8 @@ class LazyThreadPool:
         worker_args = (self.task_queue, self.completed_queue, self.pause_event, self.stop_event)
         self.workers = [Worker(wid, *worker_args) for wid in range(num_workers)]
         self.num_tasks_scheduled = 0
-        self.num_tasks_completed = 0
+        self.num_tasks_succeeded = 0
+        self.num_tasks_yielded = 0
 
     def __str__(self):
         return (
@@ -92,7 +93,7 @@ class LazyThreadPool:
             f"prefetch={self.completed_queue.maxsize}, "
             f"num_retries={self.num_retries}, "
             f"num_tasks_scheduled={self.num_tasks_scheduled}, "
-            f"num_tasks_completed={self.num_tasks_completed})"
+            f"num_tasks_succeeded={self.num_tasks_succeeded})"
         )
 
     def schedule_task(self, task_fn, task_input=None, retries=None):
@@ -148,7 +149,8 @@ class LazyThreadPool:
         self.clear_pending_tasks()
         self.drain_completed_tasks()
         self.num_tasks_scheduled = 0
-        self.num_tasks_completed = 0
+        self.num_tasks_yielded = 0
+        self.num_tasks_succeeded = 0
 
     def yield_completed(self) -> iter:
         """
@@ -157,21 +159,21 @@ class LazyThreadPool:
         This method will block and wait for results to appear in the completed_queue
         and will yield them one by one until all scheduled tasks have been accounted for.
         """
-        num_yielded = 0
-        while num_yielded < self.num_tasks_scheduled:
+        while self.num_tasks_yielded < self.num_tasks_scheduled:
             # get() is a blocking call. It will wait here indefinitely until a
             # worker puts a result in the queue. It does NOT depend on timing.
             task_result = self.completed_queue.get()
             self.completed_queue.task_done()
-            num_yielded += 1
-            self.num_tasks_completed += 1 if task_result['success'] else 0
+            self.num_tasks_yielded += 1
+            self.num_tasks_succeeded += 1 if task_result['success'] else 0
 
             yield task_result
 
     def progress(self) -> dict[str, int]:
-        return dict(num_tasks_completed=self.num_tasks_completed, num_tasks_scheduled=self.num_tasks_scheduled)
+        return dict(num_tasks_succeeded=self.num_tasks_succeeded, num_tasks_scheduled=self.num_tasks_scheduled, num_tasks_yielded=self.num_tasks_yielded)
 
     def wait_completion(self):
         self.task_queue.join()
+        logger.debug(f"All tasks finished. Scheduled: {self.num_tasks_scheduled}. Yielded: {self.num_tasks_yielded}. Succeeded: {self.num_tasks_completed}.")
 
 #----------------------------------------------------------------------------
