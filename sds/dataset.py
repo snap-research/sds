@@ -14,7 +14,6 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import IterableDataset
 from loguru import logger
-import duckdb
 
 from sds.downloader import ParallelDownloader
 from sds.lazy_thread_pool import LazyThreadPool
@@ -33,7 +32,16 @@ PROCESSED_FIELD = '__is_processed__' # A flag to mark the sample as processed.
 SAMPLE_KEY_FIELD = '__sample_key__' # A key for the sample, corresponding to the index column value.
 DATA_TYPE_FIELD = '__data_type__' # The data type of the sample, e.g. 'csv', 'json', 'parquet', etc.
 SCHEDULE_BATCH_SIZE = 30_000 # The number of samples to schedule for download in one batch on each data worker.
-MIN_NUM_PENDING_TASKS_THRESH = 5_000
+MIN_NUM_PENDING_TASKS_THRESH = {
+    DataSampleType.IMAGE: 5_000,
+    DataSampleType.VIDEO: 500,
+    DataSampleType.AUDIO: 5_000,
+    DataSampleType.TEXT: 5_000,
+    DataSampleType.IMAGE_LATENT: 5_000,
+    DataSampleType.VIDEO_LATENT: 500,
+    DataSampleType.AUDIO_LATENT: 5_000,
+    DataSampleType.TEXT_LATENT: 5_000,
+}
 
 #---------------------------------------------------------------------------
 
@@ -61,6 +69,7 @@ class StreamingDataset(IterableDataset):
         max_index_files_to_use: int | None=None, # If specified, use only the first N index files for the dataset. Useful for debugging or testing.
         lazy_index_chunk_size: int | None=None, # If positive, would only be reading `index_chunk_size` rows from the index file at a time. Also, won't load the whole index into memory.
         sql_query: str | None=None, # If specified, use the SQL query to filter/process the samples from the index file before downloading anything.
+        min_num_pending_tasks_thresh: int | None=None, # The minimum number of pending tasks to keep in the downloader before scheduling more.
 
         # Some index optimization stuff.
         index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
@@ -87,6 +96,7 @@ class StreamingDataset(IterableDataset):
         self._max_index_files_to_use = max_index_files_to_use
         self._lazy_index_chunk_size = lazy_index_chunk_size
         self._sql_query = sql_query
+        self._min_num_pending_tasks_thresh: int = min_num_pending_tasks_thresh if min_num_pending_tasks_thresh is not None else MIN_NUM_PENDING_TASKS_THRESH[self.data_type]
 
         # Random access parameters.
         self._num_random_access_retries = num_random_access_retries
@@ -339,8 +349,8 @@ class StreamingDataset(IterableDataset):
             # Otherwise, we would start at a much earlier actual sample id when loading the state dict.
             self.sample_in_epoch += 1
 
-            # If we have less than MIN_NUM_PENDING_TASKS_THRESH pending tasks, schedule more.
-            if self.downloader.get_num_pending_tasks() < MIN_NUM_PENDING_TASKS_THRESH and (next_index_chunk := next(index_iterator, None)) is not None:
+            # If we have less than the min amount of pending tasks, schedule more.
+            if self.downloader.get_num_pending_tasks() < self._min_num_pending_tasks_thresh and (next_index_chunk := next(index_iterator, None)) is not None:
                 self._schedule_downloads_(next_index_chunk, **scheduling_kwargs)
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
