@@ -131,6 +131,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Deterministic order for the thread pool downloader.
 - [x] For lazy index, schedule next index chunk before the current one is finished.
 - [x] Make MultiStreamDataLoader robust to re-opening the iterator.
+- [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 
 ### TODOs for v2.5
 - [ ] Fix TODOs in the codebase.

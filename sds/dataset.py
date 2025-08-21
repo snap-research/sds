@@ -292,6 +292,7 @@ class StreamingDataset(IterableDataset):
         assert sample_meta[PROCESSED_FIELD], "Sample must be processed before deletion."
         for col in self.columns_to_download:
             try:
+                assert col in sample_meta, f"Column {col} not found in sample_meta with keys: {list(sample_meta.keys())}."
                 file_path = sample_meta[col]
                 assert os.path.exists(file_path), f"File {file_path} does not exist."
                 os.remove(file_path)
