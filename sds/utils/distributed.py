@@ -302,12 +302,10 @@ def get_local_node_group() -> torch.distributed.ProcessGroup | None:
         return None
 
     world_size = get_world_size()
-    rank = get_rank()
     local_world_size = get_local_world_size()
     current_node_rank = get_node_rank()
 
     # Find all global ranks that are on the same node as the current process
-    node_rank_to_node_group = {}
     for node_rank in range(world_size // local_world_size):
         maybe_barrier()  # Ensure all ranks reach this point before proceeding
         ranks_on_node = list(range(node_rank * local_world_size, (node_rank + 1) * local_world_size))

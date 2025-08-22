@@ -2,6 +2,7 @@ from enum import Enum
 import math
 from typing import Any, Iterator
 from dataclasses import dataclass, field
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -48,6 +49,7 @@ class StreamOptions:
     """
     name: str
     ratio: float
+    mixing_group_id: int
     dataloader_kwargs: dict[str, Any] = field(default_factory=dict)
     is_main: bool = False # We want to know what's the "main" stream to compute visualizations/statistics.
     batch_size: int | None = None # Total batch size across all the ranks.
@@ -75,11 +77,15 @@ class StreamOptions:
         return batch_size, batch_gpu, num_accum_rounds
 
     @staticmethod
-    def init_group(raw_stream_configs: list[dict[str, dict | str]], drop_unused: bool=False) -> list["StreamOptions"]:
+    def init_group(raw_stream_configs: list[dict[str, dict | str]], drop_unused: bool=False, mixing_strategy: str='no_mixing') -> list["StreamOptions"]:
         """
         Initializes a group of streams using their configs in a way that the ratios are correctly normalized.
         TODO: it contains some fields which are not present in the StreamOptions, but are used in the dataset...
         """
+        assert mixing_strategy in ['no_mixing', 'mix_all', 'custom'], f"Unsupported mixing strategy: {mixing_strategy}. Supported strategies are 'no_mixing', 'mix_all', and 'custom'."
+        assert mixing_strategy != 'custom' or all(s.get('mixing_group_id') is not None for s in raw_stream_configs), \
+            f"If mixing_strategy is 'custom', all streams must have a 'mixing_group_id' specified. Found: {raw_stream_configs}"
+
         if any(s.get('ratio') is not None for s in raw_stream_configs):
             assert all(s.get('ratio') is not None for s in raw_stream_configs), f"If one stream has a ratio, all streams must have ratios: {raw_stream_configs}"
             ratios = misc.normalize_ratios([s['ratio'] for s in raw_stream_configs])
@@ -102,6 +108,8 @@ class StreamOptions:
                 num_accum_rounds=raw_config.get('num_accum_rounds'),
             )
 
+            mixing_group_id = raw_config['mixing_group_id'] if mixing_strategy == 'custom' else (i if mixing_strategy == 'no_mixing' else 0)
+
             stream_configs.append(StreamOptions(
                 ratio=ratios[i],
                 is_main=raw_config.get('is_main', False),
@@ -110,6 +118,7 @@ class StreamOptions:
                 batch_size=batch_size,
                 batch_gpu=batch_gpu,
                 num_accum_rounds=num_accum_rounds,
+                mixing_group_id=mixing_group_id,
             ))
 
         return stream_configs
@@ -139,31 +148,34 @@ class MultiStreamDataLoader:
         assert num_workers == 0 or num_workers >= len(stream_opts), f"num_workers ({num_workers}) must be 0 or at least the number of stream_opts ({len(stream_opts)})."
         assert len(datasets) == len(stream_opts), f"Number of datasets ({len(datasets)}) must match the number of stream configs ({len(stream_opts)})."
 
-        self.ratios = np.array([s.ratio for s in stream_opts])
-        unused_stream_idx = np.where(self.ratios <= 0)[0]
-        datasets = [d for i, d in enumerate(datasets) if i not in unused_stream_idx]
-        stream_opts = [s for i, s in enumerate(stream_opts) if i not in unused_stream_idx]
-        self.counts = misc.probabilities_to_counts(self.ratios, precision=counts_precision)
+        stream_ratios = np.array([s.ratio for s in stream_opts])
+        unused_stream_id = np.where(stream_ratios <= 0)[0]
+        datasets = [d for i, d in enumerate(datasets) if i not in unused_stream_id]
+        stream_opts = [s for i, s in enumerate(stream_opts) if i not in unused_stream_id]
+        worker_counts = MultiStreamDataLoader.split_across_consumers(stream_ratios, num_workers) if num_workers > 0 else [0] * len(stream_opts)
 
-        worker_counts = MultiStreamDataLoader.split_across_consumers(self.ratios, num_workers) if num_workers > 0 else [0] * len(stream_opts)
+        # Unfortunately, we have a nasty "business logic" for how we mix the streams across GPUs. This makes us recompute ratios/counts for each mixing group.
         # We now have the notion of a "meta-iteration", for which we iterate over all the streams.
-        self.meta_iteration_size = sum(self.counts)
+        self._mixing_group_counts, self._mixing_group_ratios, self._mixing_group_id_to_stream_indices = get_mixing_groups(stream_opts, counts_precision)
+        self.meta_iteration_size = sum(self._mixing_group_counts)
         self.shuffle_seed = shuffle_seed
         self.schedule: ScheduleType = ScheduleType.from_str(schedule)
-        assert self.schedule == 'random' or self.meta_iteration_size < 5_000_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
+        assert self.schedule == 'random' or self.meta_iteration_size < 100_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
+
+        print('self._mixing_group_counts, self._mixing_group_ratios', self._mixing_group_counts, self._mixing_group_ratios)
 
         # Initializing the streams.
         self.streams = []
-        for stream_idx, opts in enumerate(stream_opts):
+        for stream_id, opts in enumerate(stream_opts):
             assert isinstance(opts, StreamOptions), f"Expected stream_config to be of type StreamOptions, but got {type(opts)}."
             assert 'batch_size' not in opts.dataloader_kwargs or opts.dataloader_kwargs['batch_size'] == opts.batch_gpu, \
                 f"Batch size in dataloader_kwargs ({opts.dataloader_kwargs.get('batch_size')}) must match the stream's per-gpu batch size ({opts.batch_gpu})."
-            kwargs = {**common_dataloader_kwargs, **opts.dataloader_kwargs, **{'batch_size': opts.batch_gpu, 'num_workers': worker_counts[stream_idx]}}
-            dataloader = torch.utils.data.DataLoader(dataset=datasets[stream_idx], **kwargs)
+            kwargs = {**common_dataloader_kwargs, **opts.dataloader_kwargs, **{'batch_size': opts.batch_gpu, 'num_workers': worker_counts[stream_id]}}
+            dataloader = torch.utils.data.DataLoader(dataset=datasets[stream_id], **kwargs)
             iterator = inf_loop_dataloader(dataloader)
-            self.streams.append(Stream(dataset=datasets[stream_idx], iterator=iterator, dataloader=dataloader, opts=opts))
+            self.streams.append(Stream(dataset=datasets[stream_id], iterator=iterator, dataloader=dataloader, opts=opts))
 
-        self._main_stream_idx = next(i for i, s in enumerate(self.streams) if s.opts.is_main) if any(s.opts.is_main for s in self.streams) else np.argmax(self.ratios)
+        self._main_stream_id = next(i for i, s in enumerate(self.streams) if s.opts.is_main) if any(s.opts.is_main for s in self.streams) else np.argmax(stream_ratios)
         self._num_batches_yielded = 0
 
     @staticmethod
@@ -173,15 +185,15 @@ class MultiStreamDataLoader:
         assert sum(portions) >= total, f"Worker counts {portions} exceed the total number of workers {total}."
         while sum(portions) > total:
             # Taking the stream with the maximum ratio and reducing it.
-            largest_stream_idx = np.argmax(portions)
-            assert portions[largest_stream_idx] > 0, f"Impossible worker counts: {portions}"
-            portions[largest_stream_idx] -= 1
+            largest_stream_id = np.argmax(portions)
+            assert portions[largest_stream_id] > 0, f"Impossible worker counts: {portions}"
+            portions[largest_stream_id] -= 1
         return portions
 
     @property
     def main_stream(self) -> Iterator:
         """Gets the stream with the highest weight."""
-        return self.streams[self._main_stream_idx]
+        return self.streams[self._main_stream_id]
 
     def state_dict(self) -> dict[str, Any]:
         return {'stream_states': [s.dataset.state_dict() for s in self.streams]}
@@ -192,9 +204,9 @@ class MultiStreamDataLoader:
         for s, state in zip(self.streams, state_dict['stream_states']):
             s.dataset.load_state_dict(state)
 
-    def _yield_batch_from_stream(self, stream_idx: int) -> Iterator[Batch]:
+    def _yield_batch_from_stream(self, stream_id: int) -> Iterator[Batch]:
         # TODO: we assume that the batch is a dict and has already been collated.
-        stream = self.streams[stream_idx]
+        stream = self.streams[stream_id]
         num_accum_rounds_left = stream.opts.num_accum_rounds
 
         while num_accum_rounds_left > 0:
@@ -202,7 +214,7 @@ class MultiStreamDataLoader:
 
             yield Batch(
                 raw_batch=next(stream.iterator),
-                stream_name=stream.opts.name or f'stream_{stream_idx:03d}',
+                stream_name=stream.opts.name or f'stream_{stream_id:03d}',
                 num_accum_rounds_left=num_accum_rounds_left,
                 data_type=stream.dataset.data_type,
             )
@@ -213,16 +225,22 @@ class MultiStreamDataLoader:
                 cur_meta_iteration = self._num_batches_yielded // self.meta_iteration_size
                 cur_sub_iteration = self._num_batches_yielded % self.meta_iteration_size
                 # TODO: we shouldn't recreate the plan on each iteration, we can do this on each meta-iteration, but that makes that code a bit uglier...
-                cur_meta_iteration_order: list[int] = sum([[i] * c for i, c in enumerate(self.counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
+                cur_meta_iteration_order: list[int] = sum([[i] * c for i, c in enumerate(self._mixing_group_counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
                 if self.schedule == ScheduleType.RANDOM_ORDER:
                     np.random.RandomState(cur_meta_iteration + 1007 * self.shuffle_seed).shuffle(cur_meta_iteration_order)
-                stream_idx = cur_meta_iteration_order[cur_sub_iteration]
+                mixing_group_idx = cur_meta_iteration_order[cur_sub_iteration]
             elif self.schedule == ScheduleType.RANDOM:
-                stream_idx = np.random.RandomState(self._num_batches_yielded + 1007 * self.shuffle_seed).choice(len(self.streams), p=self.ratios)
+                mixing_group_idx = np.random.RandomState(self._num_batches_yielded + 1007 * self.shuffle_seed).choice(len(self._mixing_group_counts), p=self._mixing_group_ratios)
             else:
                 raise ValueError(f"Unsupported schedule: {self.schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'.")
 
-            yield from self._yield_batch_from_stream(stream_idx)
+            # Now, we can choose a random stream from a given mixing group.
+            stream_indices = self._mixing_group_id_to_stream_indices[mixing_group_idx]
+            stream_ratios = np.array([self.streams[i].opts.ratio for i in stream_indices])
+            stream_ratios = stream_ratios / stream_ratios.sum()
+            stream_id = np.random.RandomState(self._num_batches_yielded + 1007 * self.shuffle_seed + 1_000_003 * dist_utils.get_rank()).choice(stream_indices, p=stream_ratios)
+
+            yield from self._yield_batch_from_stream(stream_id)
             self._num_batches_yielded += 1
 
 #----------------------------------------------------------------------------
@@ -230,5 +248,18 @@ class MultiStreamDataLoader:
 
 def inf_loop_dataloader(dataloader: torch.utils.data.DataLoader) -> Iterator[dict[str, Any]]:
     while True: yield from dataloader
+
+#----------------------------------------------------------------------------
+# Helper misc functions.
+
+def get_mixing_groups(stream_opts: list[StreamOptions], counts_precision: float) -> list[int]:
+    stream_id_to_group_id: dict[int, int] = {i: s.mixing_group_id for i, s in enumerate(stream_opts)}
+    group_id_to_stream_indicies: dict[int, list[int]] = defaultdict(list)
+    for stream_id, group_id in stream_id_to_group_id.items():
+        group_id_to_stream_indicies[group_id].append(stream_id)
+    group_ratios = [sum(stream_opts[i].ratio for i in group) for group in group_id_to_stream_indicies.values()]
+    assert all(r > 0 for r in group_ratios), f"All groups must have a positive ratio. Found: {group_ratios} for stream_opts: {stream_opts}"
+    group_counts = misc.probabilities_to_counts(group_ratios, precision=counts_precision)
+    return group_counts, group_ratios, group_id_to_stream_indicies
 
 #----------------------------------------------------------------------------

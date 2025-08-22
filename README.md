@@ -95,7 +95,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Index construction
 - [x] Dataset iterator
 - [x] Shuffling each epoch
-- [ ] Lazy index so that we can efficiently initialize large datasets on a single node without hitting disk space limits
+- [x] Lazy index so that we can efficiently initialize large datasets on a single node without hitting disk space limits
 - [x] Cache data + evict cold samples
 - [x] Video decoding
 - [x] Audio loading
@@ -103,7 +103,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
 - [ ] More test coverage: state dict, resumal, index construction, deadlocks, sync-ed dataloader, etc.
 - [ ] Documentation
-- [x] Support for data provides as callbacks (possibly via forward/backward translation)
+- [ ] Support for data provides as callbacks (possibly via forward/backward translation)
 - [x] There is no global shuffling right now, so smth like ImageNet training will be flawed.
 - [ ] Evict samples inside random access queries as well.
 - [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
@@ -132,6 +132,8 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] For lazy index, schedule next index chunk before the current one is finished.
 - [x] Make MultiStreamDataLoader robust to re-opening the iterator.
 - [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
+- [x] Docker image.
+- [x] Mixing between streams across ranks.
 
 ### TODOs for v2.5
 - [ ] Fix TODOs in the codebase.
