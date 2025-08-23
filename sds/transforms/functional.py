@@ -242,11 +242,11 @@ def resize_waveform(waveform: torch.Tensor, target_length: int, mode: str='pad_o
 # VAE latents processing functions.
 
 @beartype
-def load_torch_state_from_pickle(latents_path: str) -> dict[str, torch.Tensor]:
+def load_torch_state_from_pickle(latents_path: str, non_torch_fields: list[str] | None=None) -> dict[str, torch.Tensor]:
     with open(latents_path, 'rb') as f:
         state = pickle.load(f)
-
-    state = {k: torch.tensor(v, dtype=torch.float32) for k, v in state.items()}
+    non_torch_fields = non_torch_fields if non_torch_fields is not None else []
+    state = {k: v if k in non_torch_fields else torch.tensor(v, dtype=torch.float32) for k, v in state.items()}
 
     return state
 
@@ -262,11 +262,11 @@ def sample_image_vae_latents(latents_dict: dict[str, torch.Tensor]) -> torch.Ten
 @beartype
 def sample_video_vae_latents(
         latents_dict: dict[str, torch.Tensor],
-        original_full_shape: tuple[int, int, int, int],
-        num_rgb_frames_to_extract: int,
-        fps_orig: float,
+        orig_shape: tuple[int, int, int, int],
+        num_rgb_frames_to_extract: int | None=None,
+        fps_orig: float | None=None,
         fps_trg: float | None=None,
-        random_offset: bool=True
+        random_offset: bool=True,
     ) -> torch.Tensor:
 
     mean, logvar = latents_dict['mean'], latents_dict['logvar'] # [lt | null, lc, lh, lw], [lt | null, lc, lh, lw]
@@ -274,9 +274,11 @@ def sample_video_vae_latents(
     assert mean.ndim == 4, f"Unsupported latent shape: {mean.shape}. Expected 4D tensor."
     assert logvar.shape == mean.shape, f"Mean and logvar shapes do not match: {mean.shape} vs {logvar.shape}."
 
-    temporal_compression_rate = math.ceil(original_full_shape[0] / mean.shape[0])
+    temporal_compression_rate = math.ceil(orig_shape[0] / mean.shape[0])
+    num_rgb_frames_to_extract = orig_shape[0] if num_rgb_frames_to_extract is None else num_rgb_frames_to_extract
     num_latent_frames_to_extract = math.ceil(num_rgb_frames_to_extract / temporal_compression_rate)
     if fps_trg is not None:
+        assert fps_orig is not None, "Original FPS must be provided if target FPS is specified."
         assert (fps_orig / fps_trg).is_integer() and fps_orig >= fps_trg, f"FPS ratio {fps_orig} / {fps_trg} is not a positive integer. For latents, we cant decode at arbitrary framerates."
         frames_skip_factor = int(fps_orig / fps_trg)
     else:
@@ -289,7 +291,7 @@ def sample_video_vae_latents(
     latent_frames_mean = mean[latent_frames_idx]  # [clip_length, lc, lh, lw]
     latent_frames_logvar = logvar[latent_frames_idx]  # [clip_length, lc, lh, lw]
 
-    frames = latent_frames_mean + np.random.randn(*latent_frames_mean.shape) * np.exp(0.5 * latent_frames_logvar) # [clip_length | null, lc, lh, lw]
+    frames = latent_frames_mean + torch.randn_like(latent_frames_logvar) * np.exp(0.5 * latent_frames_logvar) # [clip_length | null, lc, lh, lw]
 
     return frames
 

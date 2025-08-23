@@ -134,6 +134,9 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 - [x] Docker image.
 - [x] Mixing between streams across ranks.
+- [ ] First select a caption embedding, then download the selected one for traffic optimization.
+- [ ] BQ script with exportion into a single parquet file.
+- [x] Video latents loading.
 
 ### TODOs for v2.5
 - [ ] Fix TODOs in the codebase.

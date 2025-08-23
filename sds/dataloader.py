@@ -162,8 +162,6 @@ class MultiStreamDataLoader:
         self.schedule: ScheduleType = ScheduleType.from_str(schedule)
         assert self.schedule == 'random' or self.meta_iteration_size < 100_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
 
-        print('self._mixing_group_counts, self._mixing_group_ratios', self._mixing_group_counts, self._mixing_group_ratios)
-
         # Initializing the streams.
         self.streams = []
         for stream_id, opts in enumerate(stream_opts):
