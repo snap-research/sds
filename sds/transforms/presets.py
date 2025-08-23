@@ -204,11 +204,11 @@ class LoadLatentFromDiskTransform(BaseTransform):
     """Loads VAE latents from a file."""
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[])
-        sample[self.output_field] = SDF.load_torch_state_from_pickle(sample[self.input_field])
+        sample[self.output_field] = SDF.load_torch_state_from_pickle(sample[self.input_field], non_torch_fields=['input_shape', 'input_framerate'])
         return sample
 
-class SampleVAELatentTransform(BaseTransform):
-    """Samples VAE latents from a sample."""
+class SampleImageVAELatentTransform(BaseTransform):
+    """Samples image VAE latents from a sample."""
     def __init__(self, input_field: str, output_field: str | None = None, mean_field: str='mean', logvar_field: str='logvar'):
         self.input_field = input_field
         self.output_field = output_field if output_field is not None else input_field
@@ -217,7 +217,30 @@ class SampleVAELatentTransform(BaseTransform):
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present={self.input_field: dict}, absent=[])
-        sample[self.output_field] = SDF.sample_image_vae_latents(sample[self.input_field])
+        latents_dict = dict(mean=sample[self.input_field][self.mean_field], logvar=sample[self.input_field][self.logvar_field])
+        sample[self.output_field] = SDF.sample_image_vae_latents(latents_dict)
+        return sample
+
+class SampleVideoVAELatentTransform:
+    def __init__(self, input_field: str, output_field: str | None = None, mean_field: str='mean', logvar_field: str='logvar', framerate: float | None=None, random_offset: bool=False):
+        self.input_field = input_field
+        self.output_field = output_field if output_field is not None else input_field
+        self.mean_field = mean_field
+        self.logvar_field = logvar_field
+        self.framerate = framerate
+        self.random_offset = random_offset
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: dict}, absent=[])
+        raw_latents_dict = sample[self.input_field]
+        latents_dict = dict(mean=raw_latents_dict[self.mean_field], logvar=raw_latents_dict[self.logvar_field])
+        sample[self.output_field] = SDF.sample_video_vae_latents(
+            latents_dict=latents_dict,
+            orig_shape=tuple(raw_latents_dict['input_shape']),
+            fps_orig=raw_latents_dict.get('input_framerate'),
+            fps_trg=self.framerate,
+            random_offset=self.random_offset
+        )
         return sample
 
 #----------------------------------------------------------------------------
@@ -577,7 +600,7 @@ def create_standard_image_latent_pipeline(image_latent_field: str, return_image_
     """Creates a standard image dataloading transform by composing transform classes."""
     transforms: list[SampleTransform] = [
         LoadLatentFromDiskTransform(input_field=image_latent_field, output_field='image'),
-        SampleVAELatentTransform(input_field='image'),
+        SampleImageVAELatentTransform(input_field='image'),
     ]
 
     if return_image_as_single_frame_video:
@@ -586,6 +609,16 @@ def create_standard_image_latent_pipeline(image_latent_field: str, return_image_
             FieldsFilteringTransform(fields_to_remove=['image']),
             AugmentNewFieldsTransform(new_fields=dict(framerate=960.0)),
         ])
+
+    return transforms
+
+@beartype
+def create_standard_video_latent_pipeline(video_latent_field: str, framerate: float | None=None, random_offset: bool=True) -> list[SampleTransform]:
+    """Creates a standard video dataloading transform by composing transform classes."""
+    transforms: list[SampleTransform] = [
+        LoadLatentFromDiskTransform(input_field=video_latent_field, output_field='video'),
+        SampleVideoVAELatentTransform(input_field='video', framerate=framerate, random_offset=random_offset),
+    ]
 
     return transforms
 
