@@ -37,7 +37,7 @@ def lean_resize_frames(
         crop_before_resize: bool=True,
         allow_vertical: bool=False,
         random_resize: dict[str, float] | None=None,
-        interpolation_mode=TVF.InterpolationMode.LANCZOS,
+        interpolation_mode='bilinear',
     ) -> list[Image.Image] | list[torch.Tensor]:
     """
     Resizes each frame in the batch to the specified resolution.
@@ -72,7 +72,7 @@ def lean_resize_frames(
 
     if crop_before_resize:
         frames = [crop_to_aspect_ratio(x, target_aspect_ratio=w_trg / h_trg) for x in frames]
-    frames = [TVF.resize(x, size=(h_trg, w_trg), interpolation=interpolation_mode) for x in frames]
+    frames = [TVF.resize(x, size=(h_trg, w_trg), interpolation=TVF.InterpolationMode(interpolation_mode)) for x in frames]
 
     return frames
 
