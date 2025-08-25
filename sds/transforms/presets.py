@@ -573,13 +573,13 @@ class IdentityTransform:
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
 @beartype
-def create_standard_image_pipeline(image_field: str, return_image_as_single_frame_video: bool = False, normalize: bool=False, **resize_kwargs) -> list[SampleTransform]:
+def create_standard_image_pipeline(image_field: str, resolution: tuple[int, int], return_image_as_single_frame_video: bool = False, normalize: bool=False, resize_kwargs: dict={}) -> list[SampleTransform]:
     """Creates a standard image dataloading transform by composing transform classes."""
     transforms: list[SampleTransform] = [
         LoadFromDiskTransform([image_field]),
         RenameFieldsTransform(old_to_new_mapping={image_field: 'image'}),
         DecodeImageTransform(input_field='image', output_field='image'),
-        ResizeImageTransform(input_field='image', **resize_kwargs),
+        ResizeImageTransform(input_field='image', resolution=resolution, **resize_kwargs),
         ConvertImageToByteTensorTransform(input_field='image', output_field='image'),
     ]
 
@@ -652,10 +652,11 @@ def create_standard_metadata_pipeline(
 def create_standard_video_pipeline(
     video_field: str,
     num_frames: int,
+    resolution: tuple[int, int], # Target spatial video resolution.
     decode_kwargs={}, # Extra decoding parameters for DecodeVideoTransform
     normalize: bool = False, # Whether to normalize the video frames to [-1, 1] range.
     original_resolution_fields: tuple[str, str] | None = None, # If provided, will undistort the video frames based on original height/width.
-    **resize_kwargs,
+    resize_kwargs: dict = {}, # Extra resizing parameters for ResizeVideoTransform
 ):
     """
     Creates a standard text/video dataloading transform, which loads and decodes a video.
@@ -664,7 +665,7 @@ def create_standard_video_pipeline(
         RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
         DecodeVideoTransform(input_field='video', num_frames=num_frames, **decode_kwargs),
         UndistortFramesTransform(input_field='video', original_resolution_fields=original_resolution_fields) if original_resolution_fields else IdentityTransform(),
-        ResizeVideoTransform(input_field='video', **resize_kwargs),
+        ResizeVideoTransform(input_field='video', resolution=resolution, **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field='video'),
     ]
 
@@ -677,10 +678,11 @@ def create_standard_video_pipeline(
 def create_standard_joint_video_audio_pipeline(
     video_field: str,
     num_frames: int,
+    resolution: tuple[int, int], # Target spatial video resolution.
     decode_kwargs={}, # Extra decoding parameters for DecodeAudioFromVideoTransform
     mono_audio: bool = True,
     target_audio_sr: int = 16000, # Audio sampling rate
-    **resize_kwargs,
+    resize_kwargs: dict = {}, # Extra resizing parameters for ResizeVideoTransform
 ):
     """
     Creates a standard joint audio/video dataloading transform, which loads and decodes a video and audio together.
@@ -696,7 +698,7 @@ def create_standard_joint_video_audio_pipeline(
             num_frames=num_frames,
             **decode_kwargs
         ),
-        ResizeVideoTransform(input_field='video', **resize_kwargs),
+        ResizeVideoTransform(input_field='video', resolution=resolution, **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field='video'),
         ConvertAudioToFloatTensorTransform(input_field='audio'),
         ResizeAudioTransform(
