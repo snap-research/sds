@@ -20,19 +20,6 @@ class ScheduleType(Enum):
     RANDOM_ORDER = 'random_order'
     FIXED_RANDOM_ORDER = 'fixed_random_order'
 
-    @classmethod
-    def from_str(cls, schedule: str) -> 'ScheduleType':
-        if schedule == 'random':
-            return cls.RANDOM
-        elif schedule == 'random_order':
-            return cls.RANDOM_ORDER
-        elif schedule == 'fixed_random_order':
-            return cls.FIXED_RANDOM_ORDER
-        elif schedule == 'consecutive':
-            return cls.CONSECUTIVE
-        else:
-            raise ValueError(f"Unsupported schedule: {schedule}. Supported schedules are {list(cls)}.")
-
 class Batch(dict):
     """A clumsy dict wrapper to augment batches with additional metadata."""
     def __init__(self, raw_batch: dict, stream_name: str | None = None, num_accum_rounds_left: int = 0, data_type: DataSampleType | None=None):
@@ -160,7 +147,7 @@ class MultiStreamDataLoader:
         self._mixing_group_counts, self._mixing_group_ratios, self._mixing_group_id_to_stream_indices = get_mixing_groups(stream_opts, counts_precision)
         self.meta_iteration_size = sum(self._mixing_group_counts)
         self.shuffle_seed = shuffle_seed
-        self.schedule: ScheduleType = ScheduleType.from_str(schedule)
+        self.schedule: ScheduleType = ScheduleType(schedule)
         assert self.schedule == ScheduleType.RANDOM or self.meta_iteration_size < 100_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
 
         # Initializing the streams.
