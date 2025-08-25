@@ -137,6 +137,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] First select a caption embedding, then download the selected one for traffic optimization.
 - [ ] BQ script with exportion into a single parquet file.
 - [x] Video latents loading.
+- [x] Fixed random order.
 
 ### TODOs for v2.5
 - [ ] Fix TODOs in the codebase.

@@ -16,8 +16,9 @@ import sds.utils.distributed as dist_utils
 
 class ScheduleType(Enum):
     RANDOM = 'random'
-    RANDOM_ORDER = 'random_order'
     CONSECUTIVE = 'consecutive'
+    RANDOM_ORDER = 'random_order'
+    FIXED_RANDOM_ORDER = 'fixed_random_order'
 
     @classmethod
     def from_str(cls, schedule: str) -> 'ScheduleType':
@@ -25,11 +26,12 @@ class ScheduleType(Enum):
             return cls.RANDOM
         elif schedule == 'random_order':
             return cls.RANDOM_ORDER
+        elif schedule == 'fixed_random_order':
+            return cls.FIXED_RANDOM_ORDER
         elif schedule == 'consecutive':
             return cls.CONSECUTIVE
         else:
-            raise ValueError(f"Unsupported schedule: {schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'.")
-
+            raise ValueError(f"Unsupported schedule: {schedule}. Supported schedules are {list(cls)}.")
 
 class Batch(dict):
     """A clumsy dict wrapper to augment batches with additional metadata."""
@@ -140,11 +142,10 @@ class MultiStreamDataLoader:
             stream_opts: list[StreamOptions],
             num_workers: int = 0,
             shuffle_seed: int | None = 42,
-            schedule: str = 'random_order',
+            schedule: str = 'fixed_random_order',
             counts_precision: int = 6,
             **common_dataloader_kwargs,
         ):
-        assert schedule in ['random', 'consecutive', 'random_order'], f"Unsupported schedule: {schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'."
         assert num_workers == 0 or num_workers >= len(stream_opts), f"num_workers ({num_workers}) must be 0 or at least the number of stream_opts ({len(stream_opts)})."
         assert len(datasets) == len(stream_opts), f"Number of datasets ({len(datasets)}) must match the number of stream configs ({len(stream_opts)})."
 
@@ -160,7 +161,7 @@ class MultiStreamDataLoader:
         self.meta_iteration_size = sum(self._mixing_group_counts)
         self.shuffle_seed = shuffle_seed
         self.schedule: ScheduleType = ScheduleType.from_str(schedule)
-        assert self.schedule == 'random' or self.meta_iteration_size < 100_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
+        assert self.schedule == ScheduleType.RANDOM or self.meta_iteration_size < 100_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
 
         # Initializing the streams.
         self.streams = []
@@ -219,13 +220,14 @@ class MultiStreamDataLoader:
 
     def __iter__(self) -> Any:
         while True:
-            if self.schedule in [ScheduleType.CONSECUTIVE, ScheduleType.RANDOM_ORDER]:
+            if self.schedule in (ScheduleType.CONSECUTIVE, ScheduleType.RANDOM_ORDER, ScheduleType.FIXED_RANDOM_ORDER):
                 cur_meta_iteration = self._num_batches_yielded // self.meta_iteration_size
                 cur_sub_iteration = self._num_batches_yielded % self.meta_iteration_size
                 # TODO: we shouldn't recreate the plan on each iteration, we can do this on each meta-iteration, but that makes that code a bit uglier...
                 cur_meta_iteration_order: list[int] = sum([[i] * c for i, c in enumerate(self._mixing_group_counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
-                if self.schedule == ScheduleType.RANDOM_ORDER:
-                    np.random.RandomState(cur_meta_iteration + 1007 * self.shuffle_seed).shuffle(cur_meta_iteration_order)
+                if self.schedule in (ScheduleType.RANDOM_ORDER, ScheduleType.FIXED_RANDOM_ORDER):
+                    shuffle_seed = (cur_meta_iteration + 1007 * self.shuffle_seed) if self.schedule == ScheduleType.RANDOM_ORDER else self.shuffle_seed
+                    np.random.RandomState(shuffle_seed).shuffle(cur_meta_iteration_order)
                 mixing_group_idx = cur_meta_iteration_order[cur_sub_iteration]
             elif self.schedule == ScheduleType.RANDOM:
                 mixing_group_idx = np.random.RandomState(self._num_batches_yielded + 1007 * self.shuffle_seed).choice(len(self._mixing_group_counts), p=self._mixing_group_ratios)
