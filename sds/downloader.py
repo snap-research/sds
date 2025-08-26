@@ -1,6 +1,6 @@
 import os
 import urllib.parse
-from typing import Generator, Any
+from typing import Generator
 from dataclasses import dataclass
 
 from loguru import logger

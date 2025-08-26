@@ -5,7 +5,6 @@ import io
 import math
 import pickle
 from typing import Union, Any
-from collections.abc import Callable
 
 from beartype import beartype
 import numpy as np

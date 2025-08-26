@@ -2,7 +2,6 @@
 A general-purpose thread-pool logic class which can execute tasks with prefetching.
 """
 
-import time
 import queue
 import threading
 

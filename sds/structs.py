@@ -1,6 +1,5 @@
 from enum import Enum
 from typing import Any, Callable, TypeAlias, Generator
-from dataclasses import dataclass
 from PIL import Image
 
 #---------------------------------------------------------------------------

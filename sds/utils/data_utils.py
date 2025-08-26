@@ -6,7 +6,6 @@ from functools import partial
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pyarrow.dataset as ds
 import pyarrow.fs as fs
 import pandas as pd
 import polars as pl
