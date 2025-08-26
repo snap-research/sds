@@ -5,7 +5,7 @@ They are structured as classes because they need to be pickleable for distribute
 """
 import json
 import random
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import torch
@@ -318,7 +318,7 @@ class TextEmbLoaderTransform:
 @beartype
 class TextEmbSamplingTransform:
     """Subsamples text embeddings from a sample."""
-    def __init__(self, input_text_fields: list[str], input_text_emb_fields: list[str], probabilities: list[float], output_text_field: str, output_text_emb_field: str, cleanup: bool=True, allow_missing: bool=False):
+    def __init__(self, input_text_fields: Sequence[str], input_text_emb_fields: Sequence[str], probabilities: Sequence[float], output_text_field: str, output_text_emb_field: str, cleanup: bool=True, allow_missing: bool=False):
         assert len(input_text_fields) == len(input_text_emb_fields) == len(probabilities), \
             f"Input fields, text embedding fields, and probabilities must have the same length: {len(input_text_fields)}, {len(input_text_emb_fields)}, {len(probabilities)}."
         self.input_text_fields = input_text_fields
@@ -420,7 +420,7 @@ class ClassNameToIDTransform:
 class GatherFieldsTransform:
     """Gathers specified fields from the sample into a new dictionary."""
     _supported_output_types = (dict, list, torch.Tensor)
-    def __init__(self, input_fields: list[str], output_field: str, output_type: type = dict):
+    def __init__(self, input_fields: Sequence[str], output_field: str, output_type: type = dict):
         assert output_type in self._supported_output_types, f"output_type must be in {self._supported_output_types}, got {output_type}."
         assert len(input_fields) > 0, "At least one field must be specified to gather."
         self.input_fields = input_fields
@@ -474,7 +474,7 @@ class RenameFieldsTransform:
 @beartype
 class LoadFromDiskTransform:
     """Loads specified binary files from disk into memory."""
-    def __init__(self, fields_to_load: list[str]):
+    def __init__(self, fields_to_load: Sequence[str]):
         assert len(fields_to_load) > 0, "At least one field must be specified to load from disk."
         self.fields_to_load = fields_to_load
 
@@ -488,7 +488,7 @@ class LoadFromDiskTransform:
 @beartype
 class FieldsFilteringTransform:
     """Filters fields in the sample data, keeping or removing specified fields."""
-    def __init__(self, fields_to_keep: list[str] | None = None, fields_to_remove: list[str] | None = None):
+    def __init__(self, fields_to_keep: Sequence[str] | None = None, fields_to_remove: Sequence[str] | None = None):
         assert fields_to_keep is not None or fields_to_remove is not None, "At least one of fields_to_keep or fields_to_remove must be provided."
         self.fields_to_keep = fields_to_keep
         self.fields_to_remove = fields_to_remove
@@ -532,7 +532,7 @@ class EnsureFieldsTransform:
     """
     A transform which checks that the values for given fields are not None or empty.
     """
-    def __init__(self, fields_whitelist: list[str] | dict[str, type], check_dummy_values: bool = False, drop_others: bool=False):
+    def __init__(self, fields_whitelist: Sequence[str] | dict[str, type], check_dummy_values: bool = False, drop_others: bool=False):
         self.fields_whitelist = fields_whitelist
         self.check_dummy_values = check_dummy_values
         self.drop_others = drop_others
@@ -548,7 +548,7 @@ class EnsureFieldsTransform:
 @beartype
 class FindNonDummyValueTransform:
     """Searches over a given list of fields to find the very first non-dummy value."""
-    def __init__(self, input_fields: list[str], output_field: str):
+    def __init__(self, input_fields: Sequence[str], output_field: str):
         assert len(input_fields) > 0, "At least one input field must be specified."
         self.input_fields = input_fields
         self.output_field = output_field
@@ -573,9 +573,9 @@ class IdentityTransform:
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
 @beartype
-def create_standard_image_pipeline(image_field: str, resolution: tuple[int, int], return_image_as_single_frame_video: bool = False, normalize: bool=False, resize_kwargs: dict={}) -> list[SampleTransform]:
+def create_standard_image_pipeline(image_field: str, resolution: tuple[int, int], return_image_as_single_frame_video: bool = False, normalize: bool=False, resize_kwargs: dict={}) -> Sequence[SampleTransform]:
     """Creates a standard image dataloading transform by composing transform classes."""
-    transforms: list[SampleTransform] = [
+    transforms: Sequence[SampleTransform] = [
         LoadFromDiskTransform([image_field]),
         RenameFieldsTransform(old_to_new_mapping={image_field: 'image'}),
         DecodeImageTransform(input_field='image', output_field='image'),
@@ -596,9 +596,9 @@ def create_standard_image_pipeline(image_field: str, resolution: tuple[int, int]
     return transforms
 
 @beartype
-def create_standard_image_latent_pipeline(image_latent_field: str, return_image_as_single_frame_video: bool = False) -> list[SampleTransform]:
+def create_standard_image_latent_pipeline(image_latent_field: str, return_image_as_single_frame_video: bool = False) -> Sequence[SampleTransform]:
     """Creates a standard image dataloading transform by composing transform classes."""
-    transforms: list[SampleTransform] = [
+    transforms: Sequence[SampleTransform] = [
         LoadLatentFromDiskTransform(input_field=image_latent_field, output_field='image'),
         SampleImageVAELatentTransform(input_field='image'),
     ]
@@ -613,9 +613,9 @@ def create_standard_image_latent_pipeline(image_latent_field: str, return_image_
     return transforms
 
 @beartype
-def create_standard_video_latent_pipeline(video_latent_field: str, framerate: float | None=None, random_offset: bool=True) -> list[SampleTransform]:
+def create_standard_video_latent_pipeline(video_latent_field: str, framerate: float | None=None, random_offset: bool=True) -> Sequence[SampleTransform]:
     """Creates a standard video dataloading transform by composing transform classes."""
-    transforms: list[SampleTransform] = [
+    transforms: Sequence[SampleTransform] = [
         LoadLatentFromDiskTransform(input_field=video_latent_field, output_field='video'),
         SampleVideoVAELatentTransform(input_field='video', framerate=framerate, random_offset=random_offset),
     ]
@@ -629,9 +629,9 @@ def create_standard_metadata_pipeline(
     one_hot_encode_to_size: int | None = None,
     return_raw_metadata: bool = True,
     class_label_target_field: str = 'class_label'
-) -> list[SampleTransform]:
+) -> Sequence[SampleTransform]:
     """Creates a standard metadata processing pipeline by composing transform classes."""
-    transforms: list[SampleTransform] = [
+    transforms: Sequence[SampleTransform] = [
         LoadFromDiskTransform([metadata_field]),
         LoadJsonMetadataTransform(input_field=metadata_field),
         RenameFieldsTransform(old_to_new_mapping={metadata_field: 'meta'}),
@@ -661,7 +661,7 @@ def create_standard_video_pipeline(
     """
     Creates a standard text/video dataloading transform, which loads and decodes a video.
     """
-    transforms: list[SampleTransform] = [
+    transforms: Sequence[SampleTransform] = [
         RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
         DecodeVideoTransform(input_field='video', num_frames=num_frames, **decode_kwargs),
         UndistortFramesTransform(input_field='video', original_resolution_fields=original_resolution_fields) if original_resolution_fields else IdentityTransform(),
@@ -687,7 +687,7 @@ def create_standard_joint_video_audio_pipeline(
     """
     Creates a standard joint audio/video dataloading transform, which loads and decodes a video and audio together.
     """
-    transforms: list[SampleTransform] = [
+    transforms: Sequence[SampleTransform] = [
         RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
         DecodeVideoAndAudioTransform(
             input_field='video',
@@ -732,7 +732,7 @@ def create_standard_video_latents_pipeline():
 #----------------------------------------------------------------------------
 # Misc utils.
 
-def _validate_fields(sample: SampleData, present: list[str] | dict[str, type], absent: list[str], check_dummy_values: bool=False) -> None:
+def _validate_fields(sample: SampleData, present: Sequence[str] | dict[str, type], absent: Sequence[str], check_dummy_values: bool=False) -> None:
     """Validates that all present are present in the sample."""
     for field in present:
         assert field in sample, f"Field '{field}' not found in sample with keys {list(sample.keys())}."

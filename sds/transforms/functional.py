@@ -4,7 +4,7 @@ A set of presets for image/video/audio decoding and processing.
 import io
 import math
 import pickle
-from typing import Union, Any
+from typing import Union, Any, Sequence
 
 from beartype import beartype
 import numpy as np
@@ -31,13 +31,13 @@ def resize_image(image: Image.Image | torch.Tensor, **resize_kwargs) -> Image.Im
 
 @beartype
 def lean_resize_frames(
-        frames: list[Image.Image] | list[torch.Tensor] | torch.Tensor,
+        frames: Sequence[Image.Image] | Sequence[torch.Tensor] | torch.Tensor,
         resolution: tuple[int, int],
         crop_before_resize: bool=True,
         allow_vertical: bool=False,
         random_resize: dict[str, float] | None=None,
         interpolation_mode='bilinear',
-    ) -> list[Image.Image] | list[torch.Tensor]:
+    ) -> Sequence[Image.Image] | Sequence[torch.Tensor]:
     """
     Resizes each frame in the batch to the specified resolution.
     Possibly inverts it if it's vertical and allowed to do so.
@@ -142,7 +142,7 @@ def decode_video(
         framerate: float | None = None,
         thread_type: str | None = None,
         return_audio: bool = False,
-    ) -> tuple[list[Image.Image], float, NDArray | None, int | None]:
+    ) -> tuple[Sequence[Image.Image], float, NDArray | None, int | None]:
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
     """
@@ -241,7 +241,7 @@ def resize_waveform(waveform: torch.Tensor, target_length: int, mode: str='pad_o
 # VAE latents processing functions.
 
 @beartype
-def load_torch_state_from_pickle(latents_path: str, non_torch_fields: list[str] | None=None) -> dict[str, torch.Tensor]:
+def load_torch_state_from_pickle(latents_path: str, non_torch_fields: Sequence[str] | None=None) -> dict[str, torch.Tensor]:
     with open(latents_path, 'rb') as f:
         state = pickle.load(f)
     non_torch_fields = non_torch_fields if non_torch_fields is not None else []
