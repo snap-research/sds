@@ -16,9 +16,32 @@ import sds.utils.distributed as dist_utils
 
 class ScheduleType(Enum):
     RANDOM = 'random'
-    CONSECUTIVE = 'consecutive'
+    CONSECUTIVE = 'consecutive' # {a: 2, b: 3, c: 4} => aabbbcccc
+    CONSECUTIVE_INTERLEAVED = 'consecutive_interleaved' # {a: 2, b: 3, c: 4} => abcabcbcc (i.e. yielding each stream in order till exhaustion)
     RANDOM_ORDER = 'random_order'
     FIXED_RANDOM_ORDER = 'fixed_random_order'
+
+    @staticmethod
+    def sample_iter_idx(schedule: "ScheduleType", num_batches_yielded: int, counts: list[int], ratios: list[float], shuffle_seed: int | None) -> int:
+        if schedule == ScheduleType.RANDOM:
+            mixing_group_idx = np.random.RandomState(num_batches_yielded + 1007 * shuffle_seed).choice(len(counts), p=ratios)
+        else:
+            meta_iteration_size = sum(counts)
+            cur_meta_iteration = num_batches_yielded // meta_iteration_size
+            cur_sub_iteration = num_batches_yielded % meta_iteration_size
+
+            # TODO: we shouldn't recreate the plan on each iteration, we can do this on each meta-iteration, but that makes that code a bit uglier...
+            if schedule == ScheduleType.CONSECUTIVE_INTERLEAVED:
+                cur_meta_iteration_order = [idx for round_num in range(1, max(counts) + 1) for idx, count in enumerate(counts) if count >= round_num]
+            else:
+                cur_meta_iteration_order: list[int] = sum([[i] * c for i, c in enumerate(counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
+                if schedule in (ScheduleType.RANDOM_ORDER, ScheduleType.FIXED_RANDOM_ORDER):
+                    cur_shuffle_seed = (cur_meta_iteration + 1007 * shuffle_seed) if schedule == ScheduleType.RANDOM_ORDER else shuffle_seed
+                    np.random.RandomState(cur_shuffle_seed).shuffle(cur_meta_iteration_order)
+
+            mixing_group_idx = cur_meta_iteration_order[cur_sub_iteration]
+
+        return mixing_group_idx
 
 class Batch(dict):
     """A clumsy dict wrapper to augment batches with additional metadata."""
@@ -209,19 +232,13 @@ class MultiStreamDataLoader:
 
     def __iter__(self) -> Any:
         while True:
-            if self.schedule in (ScheduleType.CONSECUTIVE, ScheduleType.RANDOM_ORDER, ScheduleType.FIXED_RANDOM_ORDER):
-                cur_meta_iteration = self._num_batches_yielded // self.meta_iteration_size
-                cur_sub_iteration = self._num_batches_yielded % self.meta_iteration_size
-                # TODO: we shouldn't recreate the plan on each iteration, we can do this on each meta-iteration, but that makes that code a bit uglier...
-                cur_meta_iteration_order: list[int] = sum([[i] * c for i, c in enumerate(self._mixing_group_counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
-                if self.schedule in (ScheduleType.RANDOM_ORDER, ScheduleType.FIXED_RANDOM_ORDER):
-                    shuffle_seed = (cur_meta_iteration + 1007 * self.shuffle_seed) if self.schedule == ScheduleType.RANDOM_ORDER else self.shuffle_seed
-                    np.random.RandomState(shuffle_seed).shuffle(cur_meta_iteration_order)
-                mixing_group_idx = cur_meta_iteration_order[cur_sub_iteration]
-            elif self.schedule == ScheduleType.RANDOM:
-                mixing_group_idx = np.random.RandomState(self._num_batches_yielded + 1007 * self.shuffle_seed).choice(len(self._mixing_group_counts), p=self._mixing_group_ratios)
-            else:
-                raise ValueError(f"Unsupported schedule: {self.schedule}. Supported schedules are 'random', 'consecutive', and 'random_order'.")
+            mixing_group_idx = self.schedule.sample_iter_idx(
+                schedule=self.schedule,
+                num_batches_yielded=self._num_batches_yielded,
+                counts=self._mixing_group_counts,
+                ratios=self._mixing_group_ratios,
+                shuffle_seed=self.shuffle_seed,
+            )
 
             # Now, we can choose a random stream from a given mixing group.
             stream_indices = self._mixing_group_id_to_stream_indices[mixing_group_idx]

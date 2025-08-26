@@ -138,6 +138,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] BQ script with exportion into a single parquet file.
 - [x] Video latents loading.
 - [x] Fixed random order.
+- [ ] Consecutive interleaved order.
 
 ### TODOs for v2.5
 - [ ] Fix TODOs in the codebase.
