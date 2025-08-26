@@ -1,6 +1,0 @@
-loguru
-awscli
-pandas
-pyarrow
-Pillow
-polars[all]
