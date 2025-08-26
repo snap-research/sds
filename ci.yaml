@@ -1,0 +1,21 @@
+version: 1
+on:
+  push:
+    - branches: ["main"]
+      workflows:
+        - workflow_type: backend_workflow
+          build_name: publish_wheel
+  pull_request:
+    - branches: ["!!main", "*"]
+      workflows:
+        - workflow_type: backend_workflow
+          build_name: build_wheel
+  cool:
+    workflows:
+      - workflow_type: backend_workflow
+        build_name: build_wheel
+
+machamp:
+  releases:
+    - branch_name: ^main$
+    - tag_name: '[0-9]+\.[0-9]+\.[0-9]+.*'

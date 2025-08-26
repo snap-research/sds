@@ -1,0 +1,25 @@
+version: 1
+machamp:
+  publish_wheel:
+    update_ghe: true
+    steps:
+      build:
+        type: cmd
+        command: |
+          set -e
+          python3 -m pip install .[dev]
+          mkdir -p /source/output/wheel
+          python3 -m pip wheel --no-deps . -w /source/output/wheel
+        builder_image: python:3.11
+
+  build_wheel:
+    update_ghe: true
+    steps:
+      build:
+        type: cmd
+        command: |
+          set -e
+          python3 -m pip install .[dev]
+          mkdir -p test-wheel
+          python3 -m pip wheel --no-deps . -w test-wheel
+        builder_image: python:3.11
