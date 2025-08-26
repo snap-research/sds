@@ -68,6 +68,8 @@ class StreamingDataset(IterableDataset):
         print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
         max_index_files_to_use: int | None=None, # If specified, use only the first N index files for the dataset. Useful for debugging or testing.
         lazy_index_chunk_size: int | None=None, # If positive, would only be reading `index_chunk_size` rows from the index file at a time. Also, won't load the whole index into memory.
+        lazy_index_num_threads: int=3, # The number of threads to use for prefetching index chunks when using lazy index loading.
+        lazy_index_prefetch_factor: int=3, # The number of index chunks to prefetch in the background when using lazy index loading.
         sql_query: str | None=None, # If specified, use the SQL query to filter/process the samples from the index file before downloading anything.
         min_num_pending_tasks_thresh: int | None=None, # The minimum number of pending tasks to keep in the downloader before scheduling more.
 
@@ -95,6 +97,8 @@ class StreamingDataset(IterableDataset):
         self._allow_missing_columns = allow_missing_columns
         self._max_index_files_to_use = max_index_files_to_use
         self._lazy_index_chunk_size = lazy_index_chunk_size
+        self._lazy_index_num_threads = lazy_index_num_threads
+        self._lazy_index_prefetch_factor = lazy_index_prefetch_factor
         self._sql_query = sql_query
         self._min_num_pending_tasks_thresh: int = min_num_pending_tasks_thresh if min_num_pending_tasks_thresh is not None else MIN_NUM_PENDING_TASKS_THRESH[self.data_type]
 
@@ -368,8 +372,8 @@ class StreamingDataset(IterableDataset):
                 shuffle_seed=self.shuffle_seed,
                 epoch=self.epoch,
                 sample_in_epoch=self.sample_in_epoch,
-                num_threads=4,
-                prefetch_factor=5,
+                num_threads=self._lazy_index_num_threads,
+                prefetch_factor=self._lazy_index_prefetch_factor,
                 sql_query=self._sql_query,
             )
         else:
