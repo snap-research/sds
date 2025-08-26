@@ -59,7 +59,7 @@ class StreamingDataset(IterableDataset):
         prefetch: int=10, # The number of samples to prefetch in the downloader.
         num_downloading_retries: int=3, # The number of retries to download a sample if it fails.
         none_to_empty_str: bool=True, # If True, convert None column values to empty strings in the samples.
-        cache_limit: str | None='100mb', # The limit of the cache size in bytes. If None, no limit is applied.
+        cache_limit: int | str | None='100mb', # The limit of the cache size in bytes. If None, no limit is applied.
         max_size: int | None=None, # Cuts the amount of samples to this size, if specified. Useful for debugging or testing.
         resolution: Any=None, # TODO: dirty hack to support the genvid repo...
         allow_missing_columns: bool=False, # If True, ignore missing columns in the index file.
@@ -90,8 +90,8 @@ class StreamingDataset(IterableDataset):
         self.none_to_empty_str = none_to_empty_str
         self.index_col_name = index_col_name
         self._max_size = max_size
-        self._node_cache_limit = os_utils.bytes_to_int(cache_limit)
-        self._worker_cache_limit = None
+        self._node_cache_limit = os_utils.bytes_to_int(cache_limit) if cache_limit is not None else 0
+        self._worker_cache_limit = None # Will be initialized later based on the number of workers per node.
         self._disk_usage = 0 # Current cache usage in bytes.
         self._stored_sample_keys: deque[str] = deque() # A list of keys physicall stored on disk.
         self._allow_missing_columns = allow_missing_columns
@@ -114,7 +114,7 @@ class StreamingDataset(IterableDataset):
         assert self.index_col_name not in self.columns_to_download, f"Index column {self.index_col_name} cannot be in columns_to_download: {self.columns_to_download}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
         assert self.columns_to_download is not None and len(self.columns_to_download) > 0, f"Need to specify columns_to_download, but got {self.columns_to_download}."
-        assert self._node_cache_limit >= 100_000_000, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
+        assert self._node_cache_limit >= 100_000_000 or self._node_cache_limit == 0, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
         assert self._index_cols_to_keep is None or len(self._index_cols_to_keep) > 0, f"Must specify at least one column to keep in the index file, but got {self._index_cols_to_keep}."
         assert self._lazy_index_chunk_size is None or self._lazy_index_chunk_size >= 100, f"Lazy index chunk size must >= 100, but got {self._lazy_index_chunk_size}."
 
@@ -235,7 +235,8 @@ class StreamingDataset(IterableDataset):
         assert self._allow_missing_columns or len(columns_to_download) == len(self.columns_to_download), \
             f"Some columns are missing in the sample meta: {sample_meta}. Expected columns: {self.columns_to_download}, available columns: {columns_to_download}."
         source_urls: list[str] = [sample_meta[col] for col in columns_to_download]
-        destinations: list[str] = [os.path.join(self.dst, self.name, sample_meta[self.index_col_name] + os_utils.file_ext(sample_meta[col]).lower()) for col in columns_to_download]
+        destinations: list[str] = [os.path.join(self.dst, self.name, f'{sample_meta[self.index_col_name]}-{col}{os_utils.file_ext(sample_meta[col]).lower()}') for col in columns_to_download]
+        assert len(set(destinations)) == len(destinations), f"Some destination paths are duplicated: {destinations}."
         downloading_result = self.downloader.schedule_task(
             key=key,
             source_urls=source_urls,
@@ -311,7 +312,7 @@ class StreamingDataset(IterableDataset):
                 assert os.path.exists(file_path), f"File {file_path} does not exist."
                 os.remove(file_path)
             except Exception as e:
-                logger.error(f"Failed to delete file {file_path} for sample {sample_meta[self.index_col_name]}: {e}")
+                logger.error(f"Column: {col}. Failed to delete file {file_path} for sample {sample_meta[self.index_col_name]}: {e}")
                 if self._print_exceptions:
                     logger.error(traceback.format_exc())
 
