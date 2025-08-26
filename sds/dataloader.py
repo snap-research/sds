@@ -131,6 +131,7 @@ class MultiStreamDataLoader:
             shuffle_seed: int | None = 42,
             schedule: str = 'fixed_random_order',
             counts_precision: int = 6,
+            reweight_workers: bool = True,
             **common_dataloader_kwargs,
         ):
         assert num_workers == 0 or num_workers >= len(stream_opts), f"num_workers ({num_workers}) must be 0 or at least the number of stream_opts ({len(stream_opts)})."
@@ -140,7 +141,8 @@ class MultiStreamDataLoader:
         unused_stream_id = np.where(stream_ratios <= 0)[0]
         datasets = [d for i, d in enumerate(datasets) if i not in unused_stream_id]
         stream_opts = [s for i, s in enumerate(stream_opts) if i not in unused_stream_id]
-        worker_counts = MultiStreamDataLoader.split_across_consumers(stream_ratios, num_workers) if num_workers > 0 else [0] * len(stream_opts)
+        worker_ratios = stream_ratios if reweight_workers else ([1 / len(stream_opts)] * len(stream_opts))
+        worker_counts = MultiStreamDataLoader.split_across_consumers(worker_ratios, num_workers) if num_workers > 0 else [0] * len(stream_opts)
 
         # Unfortunately, we have a nasty "business logic" for how we mix the streams across GPUs. This makes us recompute ratios/counts for each mixing group.
         # We now have the notion of a "meta-iteration", for which we iterate over all the streams.
