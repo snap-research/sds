@@ -309,6 +309,9 @@ class StreamingDataset(IterableDataset):
             try:
                 assert col in sample_meta, f"[{self.name}] Column {col} not found in sample_meta with keys: {list(sample_meta.keys())}."
                 file_path = sample_meta[col]
+                if file_path in ('', None):
+                    assert self._allow_missing_columns, f"[{self.name}] Column {col} is empty in sample_meta: {sample_meta}, while allow_missing_columns is False."
+                    continue
                 assert os.path.exists(file_path), f"[{self.name}] File {file_path} does not exist."
                 os.remove(file_path)
             except Exception as e:
