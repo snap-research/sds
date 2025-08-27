@@ -23,7 +23,7 @@ dependencies = [
     "pyarrow>=21.0.0",
     "requests>=2.32.4",
     "tqdm>=4.67.1",
-    "polars[all]>=1.32.3"
+    "polars[numpy,pandas,pyarrow]>=1.32.3"
 ]
 
 [project.urls]
