@@ -307,12 +307,12 @@ class StreamingDataset(IterableDataset):
         assert sample_meta[PROCESSED_FIELD], "Sample must be processed before deletion."
         for col in self.columns_to_download:
             try:
-                assert col in sample_meta, f"Column {col} not found in sample_meta with keys: {list(sample_meta.keys())}."
+                assert col in sample_meta, f"[{self.name}] Column {col} not found in sample_meta with keys: {list(sample_meta.keys())}."
                 file_path = sample_meta[col]
-                assert os.path.exists(file_path), f"File {file_path} does not exist."
+                assert os.path.exists(file_path), f"[{self.name}] File {file_path} does not exist."
                 os.remove(file_path)
             except Exception as e:
-                logger.error(f"Column: {col}. Failed to delete file {file_path} for sample {sample_meta[self.index_col_name]}: {e}")
+                logger.error(f"[{self.name}] Column: {col}. Failed to delete file {file_path} for sample {sample_meta[self.index_col_name]}: {e}")
                 if self._print_exceptions:
                     logger.error(traceback.format_exc())
 
@@ -343,7 +343,7 @@ class StreamingDataset(IterableDataset):
             try:
                 yield from self._construct_samples(processed_sample_metas[sample_key])
             except Exception as e:
-                logger.error(f"Failed to construct samples from {sample_key}: {e}")
+                logger.error(f"[{self.name}] Failed to construct samples from {sample_key}: {e}")
                 if self._print_traceback:
                     logger.error(traceback.format_exc())
                 continue
