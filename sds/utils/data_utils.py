@@ -190,8 +190,7 @@ def maybe_run_sql_query_on_dataframe(df: pd.DataFrame, sql_query: str | None = N
     assert isinstance(df, pd.DataFrame), f"SQL filtering is only supported for pandas DataFrames, got {type(df)}."
     assert DATAFRAME_KEYWORD in sql_query, f"SQL query must contain '{DATAFRAME_KEYWORD}' to indicate the DataFrame to operate on. Got: {sql_query}"
 
-    logger.debug(f"Preparing to run SQL query. Shape before: {df.shape}")
-    logger.debug(f"Query: \"{sql_query}\"")
+    logger.debug(f"Preparing to run an SQL query. Shape before: {df.shape}. Query: \"{sql_query}\"")
 
     result_df = None
     try:
@@ -211,7 +210,7 @@ def maybe_run_sql_query_on_dataframe(df: pd.DataFrame, sql_query: str | None = N
         logger.error(f"An unexpected error occurred: {e}")
         raise # Also re-raise unexpected errors.
 
-    logger.debug(f"Shape after SQL query: {result_df.shape}")
+    logger.debug(f"Shape after the SQL query: {result_df.shape}")
 
     # 5. Return the new, transformed DataFrame
     return result_df

@@ -139,7 +139,7 @@ class StreamingDataset(IterableDataset):
         now = time.time()
         dist_utils.init_process_groups()
         if dist_utils.is_node_leader():
-            logger.debug(f'Building index on rank [{dist_utils.get_rank()}] for dataset {self.name} from source {self.src} to destination {self.dst}.')
+            logger.debug(f'[{self.name}] Building index on rank [{dist_utils.get_rank()}] for dataset {self.name} from source {self.src} to destination {self.dst}.')
             self.index_meta = build_index(
                 src=self.src,
                 dst_dir=self.dst,
@@ -152,12 +152,12 @@ class StreamingDataset(IterableDataset):
                 sql_query=self._sql_query,
             )
         else:
-            logger.debug(f'Waiting on rank [{dist_utils.get_rank()}] for the index to be built.')
+            logger.debug(f'[{self.name}] Waiting on rank [{dist_utils.get_rank()}] for the index to be built.')
             self.index_meta = None
         dist_utils.maybe_barrier()
-        logger.debug(f'Rank [{dist_utils.get_rank()}] finished building/waiting for building the index. Starting the broadcast.')
+        logger.debug(f'[{self.name}] Rank [{dist_utils.get_rank()}] finished building/waiting for building the index. Starting the broadcast.')
         self.index_meta = dist_utils.broadcast_object_locally(self.index_meta)
-        logger.debug(f'Got the index on rank [{dist_utils.get_rank()}]: {self.index_meta}. Took {time.time() - now:.2f} seconds.')
+        logger.debug(f'[{self.name}] Got the index on rank [{dist_utils.get_rank()}]: {self.index_meta}. Took {time.time() - now:.2f} seconds.')
 
     def state_dict(self) -> dict[str, Any]:
         return {'epoch': self.epoch, 'sample_in_epoch': self.sample_in_epoch}
@@ -289,7 +289,7 @@ class StreamingDataset(IterableDataset):
                 self._disk_usage -= processed_sample_metas[sample_key][SAMPLE_DISK_USAGE_FIELD]
                 del processed_sample_metas[sample_key]  # Remove the sample from the processed samples.
             except Exception as e:
-                logger.error(f"Failed to evict sample: {e}")
+                logger.error(f"[{self.name}] Failed to evict sample: {e}")
                 num_failures += 1
                 if num_failures > 100:
                     break # There is something wrong with the eviction process, stop it to avoid infinite loop.
@@ -301,7 +301,7 @@ class StreamingDataset(IterableDataset):
         assert global_num_workers % num_gpu_ranks == 0, f"Each GPU is expected to have the same amount of DL workers. Found {global_num_workers} workers for {num_gpu_ranks} GPUs."
         num_workers_per_node = global_num_workers // dist_utils.get_num_nodes()
         self._worker_cache_limit = self._node_cache_limit // num_workers_per_node
-        logger.debug(f"Initialized worker cache limit: {self._worker_cache_limit} bytes for rank {global_worker_rank} with {global_num_workers} workers (num_workers_per_node={num_workers_per_node}, num_nodes={dist_utils.get_num_nodes()}).")
+        logger.debug(f"[{self.name}] Initialized worker cache limit: {self._worker_cache_limit} bytes for rank {global_worker_rank} with {global_num_workers} workers (num_workers_per_node={num_workers_per_node}, num_nodes={dist_utils.get_num_nodes()}).")
 
     def _delete_sample_from_disk(self, sample_meta: dict[str, Any]) -> None:
         assert sample_meta[PROCESSED_FIELD], "Sample must be processed before deletion."
@@ -331,7 +331,7 @@ class StreamingDataset(IterableDataset):
             self._stored_sample_keys.clear()
 
     def _iter_chunks_(self, index_iterator: Iterator[pd.DataFrame], global_worker_rank: int, processed_sample_metas: dict[str, dict[str, Any]]) -> Iterator[dict[str, Any]]:
-        logger.debug(f'[rank {dist_utils.get_rank()} | worker_rank {global_worker_rank}/{dist_utils.get_world_size()}] Starting to iterate over the dataset {self.name} with {self.data_type} data type. Epoch: {self.epoch}, sample_in_epoch: {self.sample_in_epoch}.')
+        logger.debug(f'[{self.name} | rank {dist_utils.get_rank()} | worker_rank {global_worker_rank}/{dist_utils.get_world_size()}] Starting to iterate over the dataset {self.name} with {self.data_type} data type. Epoch: {self.epoch}, sample_in_epoch: {self.sample_in_epoch}.')
         scheduling_kwargs = dict(processed_sample_metas=processed_sample_metas, shuffle_seed=self.shuffle_seed, epoch=self.epoch, global_worker_rank=global_worker_rank)
         self._schedule_downloads_(next(index_iterator), **scheduling_kwargs)
 
