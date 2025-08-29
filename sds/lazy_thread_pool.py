@@ -173,6 +173,6 @@ class LazyThreadPool:
 
     def wait_completion(self):
         self.task_queue.join()
-        logger.debug(f"All tasks finished. Scheduled: {self.num_tasks_scheduled}. Yielded: {self.num_tasks_yielded}. Succeeded: {self.num_tasks_completed}.")
+        logger.debug(f"All tasks finished. Scheduled: {self.num_tasks_scheduled}. Yielded: {self.num_tasks_yielded}. Succeeded: {self.num_tasks_succeeded}.")
 
 #----------------------------------------------------------------------------

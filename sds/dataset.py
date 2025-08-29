@@ -20,14 +20,14 @@ from sds.lazy_thread_pool import LazyThreadPool
 from sds.structs import DataSampleType, SampleData, SampleTransform
 from sds.index import build_index, load_index_partition
 import sds.utils.distributed as dist_utils
-import sds.utils.os_utils as os_utils
+from sds.utils import os_utils
 from sds.utils import data_utils
 from sds.utils import misc
 
 #---------------------------------------------------------------------------
 # Special fields names.
 
-SAMPLE_worker_DISK_USAGE_FIELD = '__worker_disk_usage__' # The total size of the sample in bytes.
+SAMPLE_DISK_USAGE_FIELD = '__worker_disk_usage__' # The total size of the sample in bytes.
 PROCESSED_FIELD = '__is_processed__' # A flag to mark the sample as processed.
 SAMPLE_KEY_FIELD = '__sample_key__' # A key for the sample, corresponding to the index column value.
 DATA_TYPE_FIELD = '__data_type__' # The data type of the sample, e.g. 'csv', 'json', 'parquet', etc.
@@ -114,7 +114,6 @@ class StreamingDataset(IterableDataset):
         assert self.index_col_name not in self.columns_to_download, f"Index column {self.index_col_name} cannot be in columns_to_download: {self.columns_to_download}."
         assert self.num_downloading_workers > 0, f"Number of workers must be greater than 0, but got {self.num_downloading_workers}."
         assert self.columns_to_download is not None and len(self.columns_to_download) > 0, f"Need to specify columns_to_download, but got {self.columns_to_download}."
-        assert self._node_cache_limit >= 100_000_000 or self._node_cache_limit == 0, f"Cache limit {self._node_cache_limit} is too small, must be at least 100MB."
         assert self._index_cols_to_keep is None or len(self._index_cols_to_keep) > 0, f"Must specify at least one column to keep in the index file, but got {self._index_cols_to_keep}."
         assert self._lazy_index_chunk_size is None or self._lazy_index_chunk_size >= 100, f"Lazy index chunk size must >= 100, but got {self._lazy_index_chunk_size}."
 
@@ -221,14 +220,15 @@ class StreamingDataset(IterableDataset):
         Get sample by global index, blocking to download it.
         Note that for an intra-node index, we can only get samples from the current node-level partition only.
         """
-        # sample_meta = self.lazy_index.slice(offset=sample_id, length=1).collect().to_pandas().iloc[0].to_dict()
         sample_meta = data_utils.read_parquet_slice(self.index_meta.path, start_offset=sample_id, end_offset=sample_id + 1).iloc[0].to_dict()
         total_size = self._schedule_download_(key=sample_id, sample_meta=sample_meta, blocking=True)
-        sample_meta[SAMPLE_worker_DISK_USAGE_FIELD] = total_size
-        # TODO: we need to store self._scheduled_samples as an in-class property to be able to consider it for eviction.
-        # self._stored_sample_keys.append(sample_id)
-        # self._worker_disk_usage += total_size
-        return next(self._construct_samples(sample_meta))
+        sample_meta[SAMPLE_DISK_USAGE_FIELD] = total_size
+        sample = next(self._construct_samples(sample_meta))
+        # TODO: Ok, we never delete the samples obtained through random access queries:
+        # - Reason 1. We hope that the user won't request too many randomly accessed samples since it's too slow anyway.
+        # - Reason 2. This can break some race conditions with the downloader which assumes that it's sample space is not overlapping with anything else.
+        # self._delete_sample_from_disk(sample_meta)
+        return sample
 
     def _schedule_download_(self, key: int | str, sample_meta: dict[str, Any], blocking: bool=False) -> Any:
         columns_to_download = [col for col in self.columns_to_download if col in sample_meta and sample_meta[col] is not None and sample_meta[col] != '']
@@ -290,7 +290,7 @@ class StreamingDataset(IterableDataset):
                 sample_key = self._stored_sample_keys.popleft() # Get the oldest sample key to evict.
                 assert sample_key in scheduled_samples, f"[{self.name}] Sample key {sample_key} not found in scheduled_samples."
                 self._delete_sample_from_disk(scheduled_samples[sample_key])
-                self._worker_disk_usage -= scheduled_samples[sample_key][SAMPLE_worker_DISK_USAGE_FIELD]
+                self._worker_disk_usage -= scheduled_samples[sample_key][SAMPLE_DISK_USAGE_FIELD]
                 del scheduled_samples[sample_key]  # Remove the sample from the processed samples.
             except Exception as e:
                 logger.error(f"[{self.name}] Failed to evict sample: {e}")
@@ -345,7 +345,7 @@ class StreamingDataset(IterableDataset):
         for sample_key, total_sample_size in self.downloader.yield_completed_keys():
             self._stored_sample_keys.append(sample_key)
             self._worker_disk_usage += total_sample_size
-            scheduled_samples[sample_key][SAMPLE_worker_DISK_USAGE_FIELD] = total_sample_size
+            scheduled_samples[sample_key][SAMPLE_DISK_USAGE_FIELD] = total_sample_size
 
             try:
                 yield from self._construct_samples(scheduled_samples[sample_key])

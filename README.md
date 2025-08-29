@@ -9,8 +9,6 @@ A streaming dataset which fetches samples from anywhere and yields them on the f
 - Supports random access (through blocking calls)!
 - Has a built-int multi-stream dataloader (i.e., streaming from multiple data sources in parallel) with various mixing strategy between the streams.
 
-Based on: [snap-datastream](https://github.sc-corp.net/Snapchat/snap-datastream)
-
 ## Installation
 
 The package is available on the corporate PyPI:
@@ -79,7 +77,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 
 ## Contributing
 
-### Current TODOs
+### TODOs for v1
 - [x] Index construction
 - [x] Dataset iterator
 - [x] Shuffling each epoch
@@ -87,18 +85,9 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Cache data + evict cold samples
 - [x] Video decoding
 - [x] Audio loading
-- [ ] Tutorial/usage examples
 - [x] Resumal logic. Only if the number of ranks is not changed, since otherwise, we will have shuffling discrepancies.
-- [ ] More test coverage: state dict, resumal, index construction, deadlocks, sync-ed dataloader, etc.
-- [ ] Documentation
-- [ ] Support for data provides as callbacks (possibly via forward/backward translation)
 - [x] There is no global shuffling right now, so smth like ImageNet training will be flawed.
-- [ ] Evict samples inside random access queries as well.
-- [ ] Some addition/eviction race conditions might happen, when someone is evicting/downloading a sample which another worker is trying to get via random access.
 - [x] Remove logging calls from the codebase.
-- [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
-- [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
-- [ ] Shutdown for num_workers > 0 is quite slow. Not sure why.
 - [x] Clean broken samples from disk.
 - [x] Time-based garbage collection.
 - [x] Get/load state dict and make sure we resume from it.
@@ -107,32 +96,46 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Sometimes, we can have less raw index files that nodes.
 - [x] Missing fields should be populated in the dataloader or index meta or where? (I guess, they should automatically be filled with `None` in the index).
 - [x] Re-slice indicies based on sample counts and number of nodes.
-- [ ] Cache index: save to "cache" on S3 and load from cache (if present). Basically, if we are given a folder or split_file_paths.txt or *.csv, then we could save the index normally (though we should be careful about single-node vs multi-node cases).
 - [x] VAE latents loading.
-- [ ] Video + .wav files loading (now we only support video files with embedded audio).
 - [x] An option for interleaved indexing.
-- [ ] Refresh index cache when restarting the dataloader? I.e. at least change the new size...
-- [ ] Re-opening __iter__ for multi-stream dataloader would break the synchronization of stream types.
-- [ ] Recompute sample_in_epoch based on the number of workers. I.e. sample_in_local_epoch => sample_in_global_epoch.
+- [x] Re-opening __iter__ for multi-stream dataloader would break the synchronization of stream types.
 - [x] Lazy index does not work with sample_in_epoch.
 - [x] We shouldn't need to reset the downloader after each iter_slice finish...
-- [ ] Deterministic order for the thread pool downloader.
 - [x] For lazy index, schedule next index chunk before the current one is finished.
 - [x] Make MultiStreamDataLoader robust to re-opening the iterator.
-- [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 - [x] Docker image.
 - [x] Mixing between streams across ranks.
-- [ ] First select a caption embedding, then download the selected one for traffic optimization.
-- [ ] BQ script with exportion into a single parquet file.
+- [x] BQ script with exportion into a single parquet file.
 - [x] Video latents loading.
 - [x] Fixed random order.
 - [x] Consecutive interleaved order.
-- [ ] Allow empty columns_to_download (i.e., only metadata).
-- [ ] @beartype for streaming dataset init method.
+- [x] Put on our corp pypi.
+- [x] Evict samples inside random access queries as well.
+- [ ] Tutorial/usage examples
+- [ ] Documentation
+- [ ] Video + .wav files loading (now we only support video files with embedded audio).
+- [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 - [ ] For non-lazy parquet index without slicing and filtering, we don't need to reload-resave it.
+- [ ] First select a caption embedding, then download the selected one for traffic optimization.
+- [ ] Fix the current unit tests.
 
-### TODOs for v2.5
-- [ ] Fix TODOs in the codebase.
+### TODOs for v1.5:
+- [ ] The logic for resetting the downloader after each epoch is hacky. I dont think we should do that.
+- [ ] More test coverage: state dict, resumal, index construction, deadlocks, sync-ed dataloader, etc.
+- [ ] Shutdown for num_workers > 0 is quite slow. Not sure why.
+- [ ] Recompute sample_in_epoch based on the number of workers. I.e. sample_in_local_epoch => sample_in_global_epoch.
+- [ ] @beartype for streaming dataset init method.
+- [ ] Allow empty columns_to_download (i.e., only metadata).
+- [ ] Refresh index cache when restarting the dataloader? I.e. at least check the new size...
+- [ ] Support for data providers as callbacks (possibly via forward/backward translation)
+- [ ] Cache index: save to "cache" on S3 and load from cache (if present). Basically, if we are given a folder or split_file_paths.txt or *.csv, then we could save the index normally (though we should be careful about single-node vs multi-node cases).
+- [ ] Deterministic order for the thread pool downloader.
+- [ ] Some race conditions might happen, when someone is evicting/downloading a sample with a downloader, while someone else is doing this via random access, since random access breaks the non-overlapping assumption. Also, we don't free the disk space used by random access samples. We should probably lock the downloader (among all the node workers?!) during random access queries.
+- [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
+- [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
+
+### TODOs for v2
+- [ ] Fix TODOs in the codebase (i.e. grep for "TODO" and fix).
 - [ ] SQLite index instead of parquet.
 - [ ] Move synchronous batch-wise yielding to the `StreamingDataset` class using the round-robin assumption of torch dataloader iterating over workers.
 

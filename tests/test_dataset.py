@@ -1,251 +1,230 @@
-import pytest
-import tempfile
-import shutil
 import os
-from unittest.mock import patch, MagicMock, mock_open
-
+from unittest.mock import patch, MagicMock, call
 import pandas as pd
+import pytest
+from collections import namedtuple
 
-class MockParallelDownloader:
-    """A mock for sds.downloader.ParallelDownloader."""
-    def __init__(self, *args, **kwargs):
-        self.schedule_task = MagicMock()
-        self.yield_completed_keys = MagicMock(return_value=iter([]))
-        self.stop = MagicMock(return_value=self)
-        self.wait_completion = MagicMock()
+# Assuming your StreamingDataset class is in `sds.dataset`
+from sds.dataset import StreamingDataset
 
-# Mocks for entire modules
-mock_sds_downloader = MagicMock(ParallelDownloader=MockParallelDownloader)
-mock_sds_utils_distributed = MagicMock(
-    is_node_leader=MagicMock(return_value=True),
-    maybe_barrier=MagicMock(),
-    # The behavior will be configured in the mock_env fixture
-    broadcast_object_list_locally=MagicMock()
-)
-mock_sds_index = MagicMock()
-
-
-@pytest.fixture(scope="module")
-def dataset_class():
-    """
-    A pytest fixture that mocks external dependencies and imports the StreamingDataset
-    class. This now uses the REAL base classes for more integration-style testing.
-    """
-    # Create a mock for the parent 'utils' package
-    mock_sds_utils = MagicMock()
-    mock_sds_utils.distributed = mock_sds_utils_distributed
-
-    with patch.dict('sys.modules', {
-        # Other external dependencies are still mocked
-        'sds.downloader': mock_sds_downloader,
-        'sds.utils': mock_sds_utils, # Mock the parent package
-        'sds.utils.distributed': mock_sds_utils_distributed, # Keep the specific mock
-        'sds.utils.misc': MagicMock(),
-        'sds.structs': MagicMock(),
-        'sds.index': mock_sds_index,
-        'beartype': MagicMock(beartype=lambda x: x),
-    }):
-        # By not mocking 'streaming.base.array' and 'torch.utils.data',
-        # we allow the real base classes to be imported.
-        from sds.dataset import StreamingDataset
-        yield StreamingDataset
+# --- Fixture Definitions ----------------------------------------------------
 
 @pytest.fixture
-def mock_env():
+def mock_env(tmp_path):
     """
-    Pytest fixture to set up a temporary directory and mock objects for each test.
+    Provides a mock environment with a source path and a temporary destination directory.
+    `tmp_path` is a built-in pytest fixture that provides a temporary directory unique to the test function.
     """
-    temp_dir = tempfile.mkdtemp()
-
-    # Reset mocks before each test to ensure isolation
-    mock_sds_index.reset_mock()
-    mock_sds_utils_distributed.reset_mock()
-
-    # Mocks for index and data
-    mock_index_meta = MagicMock()
-    mock_index_meta.num_samples = 100
-    mock_sds_index.build_index.return_value = mock_index_meta
-
-    mock_index_df = pd.DataFrame({
-        'index': [f'sample_{i}' for i in range(10)],
-        'image.jpg': [f'/fake/src/path/image_{i}.jpg' for i in range(10)],
-        'label.txt': [f'/fake/src/path/label_{i}.txt' for i in range(10)],
-    })
-    mock_sds_index.load_index_partition.return_value = mock_index_df
-    mock_sds_index.load_index_row.return_value = mock_index_df.iloc[0]
-
-
-    def broadcast_side_effect(obj_list):
-        return mock_index_meta
-
-    mock_sds_utils_distributed.broadcast_object_list_locally.side_effect = broadcast_side_effect
-
-    yield {
-        "temp_dir": temp_dir,
-        "mock_src": "/fake/src/path",
-        "mock_index_meta": mock_index_meta,
-        "mock_index_df": mock_index_df,
+    return {
+        "mock_src": "/fake/s3/bucket/data",
+        "temp_dir": str(tmp_path)
     }
 
-    # Teardown logic runs after the test function completes
-    shutil.rmtree(temp_dir)
+@pytest.fixture
+def dataset_class():
+    """
+    Returns the StreamingDataset class itself.
+    """
+    return StreamingDataset
 
+# This mock object now includes the 'index_type' attribute to prevent errors,
+# although the test logic will bypass the need for it with correct patching.
+IndexMeta = namedtuple('IndexMeta', ['num_samples', 'path', 'lazy', 'index_type'])
+
+
+# --- Test Implementations ---------------------------------------------------
 
 def test_initialization_as_node_leader(mock_env, dataset_class):
     """
     Test that the dataset initializes correctly when it is the node leader.
     It should build the index.
     """
-    mock_sds_utils_distributed.is_node_leader.return_value = True
+    mock_index_meta = IndexMeta(num_samples=100, path='/mock/index.parquet', lazy=False, index_type='mock')
 
-    dataset = dataset_class(
-        src=mock_env["mock_src"],
-        dst=mock_env["temp_dir"],
-        data_type='directory'
-    )
+    # CORRECTED: Patch 'build_index' in the module where it is used ('sds.dataset')
+    with patch('sds.utils.distributed.is_node_leader', return_value=True), \
+         patch('sds.utils.distributed.init_process_groups'), \
+         patch('sds.utils.distributed.maybe_barrier'), \
+         patch('sds.utils.distributed.broadcast_object_locally', side_effect=lambda x: x) as mock_broadcast, \
+         patch('sds.dataset.build_index', return_value=mock_index_meta) as mock_build_index:
 
-    mock_sds_index.build_index.assert_called_once_with(
-        mock_env["mock_src"], mock_env["temp_dir"], 'directory'
-    )
-    assert dataset.name == 'path'
-    assert dataset.index_meta == mock_env["mock_index_meta"]
-    assert dataset.epoch == -1
+        dataset = dataset_class(
+            src=mock_env["mock_src"],
+            dst=mock_env["temp_dir"],
+            data_type='image',
+            columns_to_download=['image_url']
+        )
+
+        mock_build_index.assert_called_once()
+        mock_broadcast.assert_called_once()
+        assert dataset.index_meta == mock_index_meta
+        assert len(dataset) == 100
+
 
 def test_initialization_as_non_leader(mock_env, dataset_class):
     """
     Test that the dataset initializes correctly when it is not the node leader.
     It should NOT build the index.
     """
-    mock_sds_utils_distributed.is_node_leader.return_value = False
+    mock_index_meta = IndexMeta(num_samples=100, path='/mock/index.parquet', lazy=False, index_type='mock')
 
-    dataset = dataset_class(
-        src=mock_env["mock_src"],
-        dst=mock_env["temp_dir"],
-        data_type='directory'
-    )
+    # CORRECTED: Patch 'build_index' in the module where it is used ('sds.dataset')
+    with patch('sds.utils.distributed.is_node_leader', return_value=False), \
+         patch('sds.utils.distributed.init_process_groups'), \
+         patch('sds.utils.distributed.maybe_barrier'), \
+         patch('sds.utils.distributed.broadcast_object_locally', return_value=mock_index_meta) as mock_broadcast, \
+         patch('sds.dataset.build_index') as mock_build_index:
 
-    mock_sds_index.build_index.assert_not_called()
-    assert dataset.index_meta == mock_env["mock_index_meta"]
+        dataset = dataset_class(
+            src=mock_env["mock_src"],
+            dst=mock_env["temp_dir"],
+            data_type='image',
+            columns_to_download=['image_url']
+        )
+
+        mock_build_index.assert_not_called()
+        mock_broadcast.assert_called_once()
+        assert dataset.index_meta == mock_index_meta
+        assert len(dataset) == 100
+
 
 def test_len(mock_env, dataset_class):
     """
     Test that __len__ returns the correct number of samples from the metadata.
     """
-    dataset = dataset_class(src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='directory')
-    assert len(dataset) == 100
+    with patch.object(dataset_class, 'build_index'):
+        dataset = dataset_class(src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='image', columns_to_download=['image'])
+        dataset.index_meta = IndexMeta(num_samples=100, path='/mock/index.parquet', lazy=False, index_type='mock')
+        assert len(dataset) == 100
+
 
 def test_getitem(mock_env, dataset_class):
     """
     Test retrieving a single item via __getitem__, ensuring it triggers a blocking download.
     """
-    dataset = dataset_class(
-        src=mock_env["mock_src"],
-        dst=mock_env["temp_dir"],
-        data_type='directory',
-        columns_to_download=['image.jpg'],
-        index_col_name='index'
-    )
-    dataset.downloader = MockParallelDownloader()
+    with patch.object(dataset_class, 'build_index'):
+        dataset = dataset_class(src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='image', columns_to_download=['image_url'])
+        dataset.index_meta = IndexMeta(num_samples=100, path='/mock/index.parquet', lazy=False, index_type='mock')
+        dataset.downloader = MagicMock()
 
-    with patch('builtins.open', mock_open(read_data=b'fake_image_data')) as mock_file:
-        # Use idiomatic slicing to call __getitem__
-        item = dataset[0]
+        sample_id = 42
+        mock_sample_meta = {'index': sample_id, 'image_url': 'http://example.com/image.jpg'}
+        mock_df = pd.DataFrame([mock_sample_meta])
+        dst_path = os.path.join(dataset.dst, dataset.name, f'{sample_id}-image_url.jpg')
 
-    dataset.downloader.schedule_task.assert_called_once()
-    args, kwargs = dataset.downloader.schedule_task.call_args
-    assert kwargs['key'] == 0
-    assert kwargs['blocking'] is True
+        # CORRECTED: Patch 'read_parquet_slice' using its correct import path
+        with patch('sds.dataset.data_utils.read_parquet_slice', return_value=mock_df) as mock_read_slice:
+            item = dataset[sample_id]
 
-    expected_path = os.path.join(mock_env["temp_dir"], 'path', 'sample_0.jpg')
-    mock_file.assert_called_once_with(expected_path, 'rb')
+            mock_read_slice.assert_called_once_with(dataset.index_meta.path, start_offset=sample_id, end_offset=sample_id + 1)
+            dataset.downloader.schedule_task.assert_called_once()
+            call_args = dataset.downloader.schedule_task.call_args
+            assert call_args.kwargs['key'] == sample_id
+            assert call_args.kwargs['blocking'] is True
+            assert call_args.kwargs['destinations'] == [dst_path]
+            assert item['__sample_key__'] == sample_id
 
-    assert item == {'image.jpg': b'fake_image_data'}
 
 def test_iteration_flow(mock_env, dataset_class):
     """
-    Test the main iteration logic.
+    Test the main iteration logic, including cache eviction.
     """
-    dataset = dataset_class(
-        src=mock_env["mock_src"],
-        dst=mock_env["temp_dir"],
-        data_type='directory',
-        columns_to_download=['image.jpg', 'label.txt'],
-        index_col_name='index'
-    )
+    with patch.object(dataset_class, 'build_index'), \
+         patch('sds.utils.distributed.get_global_worker_info', return_value=(0, 1)):
 
-    mock_downloader_instance = MockParallelDownloader()
-    mock_downloader_instance.yield_completed_keys.return_value = iter(range(len(mock_env["mock_index_df"])))
+        dataset = dataset_class(
+            src=mock_env["mock_src"],
+            dst=mock_env["temp_dir"],
+            data_type='image',
+            columns_to_download=['image'],
+            cache_limit='1kb'
+        )
+        dataset.index_meta = IndexMeta(num_samples=3, path='/mock/index.parquet', lazy=False, index_type='mock')
 
-    # FIX: Make the side effect more robust by checking the file extension.
-    def file_open_side_effect(path, mode):
-        if path.endswith('.jpg'):
-            return mock_open(read_data=b'fake_image').return_value
-        if path.endswith('.txt'):
-            return mock_open(read_data=b'fake_label').return_value
-        return mock_open().return_value
+        mock_downloader = MagicMock()
+        mock_downloader.yield_completed_keys.return_value = [
+            ('sample_0', 600), # Disk usage: 600 bytes
+            ('sample_1', 600), # Disk usage: 1200 bytes > 1024, should evict sample_0
+            ('sample_2', 300), # Disk usage: 600 + 300 = 900 bytes
+        ].__iter__()
+        mock_downloader.get_num_pending_tasks.return_value = 1000
+        dataset.downloader = mock_downloader
 
-    # Patch the ParallelDownloader where it's looked up (in the sds.dataset module)
-    # to ensure our mock instance is used during iteration.
-    with patch('sds.dataset.ParallelDownloader', return_value=mock_downloader_instance):
-         with patch('builtins.open', side_effect=file_open_side_effect):
+        mock_index_df = pd.DataFrame([
+            {'index': 'sample_0', 'image': 'url0'},
+            {'index': 'sample_1', 'image': 'url1'},
+            {'index': 'sample_2', 'image': 'url2'},
+        ])
+
+        # CORRECTED: Patch 'load_index_partition' in the module where it's used
+        with patch('sds.dataset.load_index_partition', return_value=mock_index_df) as mock_load_partition, \
+             patch.object(dataset, '_delete_sample_from_disk') as mock_delete:
+
             items = list(dataset)
 
-    mock_sds_index.load_index_partition.assert_called_once()
-    assert mock_downloader_instance.schedule_task.call_count == len(mock_env["mock_index_df"])
+            mock_load_partition.assert_called_once()
+            assert len(items) == 3
+            mock_delete.assert_called_once()
+            deleted_sample_meta = mock_delete.call_args[0][0]
+            assert deleted_sample_meta['index'] == 'sample_0'
+            assert dataset._worker_disk_usage == 900
+            assert list(dataset._stored_sample_keys) == ['sample_1', 'sample_2']
 
-    # The stop() method is called at the beginning of the *next* iteration to clean up,
-    # so it won't be called in this single iteration test. This assertion is removed.
-    # mock_downloader_instance.stop.assert_called_once()
 
-    mock_downloader_instance.wait_completion.assert_called_once()
-
-    assert len(items) == len(mock_env["mock_index_df"])
-    assert 'image.jpg' in items[0]
-    assert 'label.txt' in items[0]
-    assert items[0]['image.jpg'] == b'fake_image'
-
-def test_data_processing_callback(mock_env, dataset_class):
+def test_transforms(mock_env, dataset_class):
     """
-    Test that data processing callbacks are applied correctly.
+    Test that transforms are applied correctly.
     """
-    mock_callback = MagicMock(side_effect=lambda x: {**x, 'processed': True})
+    def simple_transform(sample):
+        sample['transformed'] = True
+        return sample
 
-    dataset = dataset_class(
-        src=mock_env["mock_src"],
-        dst=mock_env["temp_dir"],
-        data_type='directory',
-        columns_to_download=['image.jpg'],
-        data_processing_callbacks=[mock_callback]
-    )
-    dataset.downloader = MockParallelDownloader()
+    def generator_transform(sample):
+        yield {**sample, 'part': 1}
+        yield {**sample, 'part': 2}
 
-    with patch('builtins.open', mock_open(read_data=b'data')):
-        # Use idiomatic slicing to call __getitem__
-        item = dataset[0]
+    with patch.object(dataset_class, 'build_index'):
+        dataset_simple = dataset_class(
+            src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='image',
+            columns_to_download=['image'], transforms=[simple_transform]
+        )
+        dataset_simple.index_meta = IndexMeta(num_samples=1, path='/mock/index.parquet', lazy=False, index_type='mock')
+        # CORRECTED: Patch 'read_parquet_slice' using its correct import path
+        with patch('sds.dataset.data_utils.read_parquet_slice', return_value=pd.DataFrame([{'index': 0, 'image': 'url0'}])):
+            item = dataset_simple[0]
+            assert 'transformed' in item and item['transformed'] is True
 
-    mock_callback.assert_called_once()
-    assert 'processed' in item
-    assert item['processed'] is True
+    with patch.object(dataset_class, 'build_index'), \
+         patch('sds.utils.distributed.get_global_worker_info', return_value=(0, 1)):
+        dataset_gen = dataset_class(
+            src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='image',
+            columns_to_download=['image'], transforms=[generator_transform]
+        )
+        dataset_gen.index_meta = IndexMeta(num_samples=1, path='/mock/index.parquet', lazy=False, index_type='mock')
+        dataset_gen.downloader = MagicMock()
+        dataset_gen.downloader.yield_completed_keys.return_value = [('sample_0', 100)].__iter__()
+        mock_index_df = pd.DataFrame([{'index': 'sample_0', 'image': 'url0'}])
+        # CORRECTED: Patch 'load_index_partition' in the module where it's used
+        with patch('sds.dataset.load_index_partition', return_value=mock_index_df):
+            items = list(dataset_gen)
+            assert len(items) == 2
+            assert items[0]['part'] == 1 and items[1]['part'] == 2
+
 
 def test_state_dict(mock_env, dataset_class):
     """
     Test saving and loading the dataset's state.
     """
-    dataset = dataset_class(src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='directory')
+    with patch.object(dataset_class, 'build_index'):
+        dataset1 = dataset_class(src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='image', columns_to_download=['image'])
+        dataset1.index_meta = IndexMeta(num_samples=100, path='/mock/index.parquet', lazy=False, index_type='mock')
+        dataset1.epoch = 5
+        dataset1.sample_in_epoch = 42
+        state = dataset1.state_dict()
+        assert state == {'epoch': 5, 'sample_in_epoch': 42}
 
-    dataset.epoch = 3
-    dataset.num_samples_yielded = 42
-
-    state = dataset.state_dict()
-    assert state == {'epoch': 3, 'num_samples_yielded': 42}
-
-    new_dataset = dataset_class(src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='directory')
-    new_dataset.load_state_dict(state)
-
-    assert new_dataset.epoch == 3
-    assert new_dataset.num_samples_yielded == 42
-
-# To run these tests:
-# 1. Make sure you have pytest installed (`pip install pytest`).
-# 2. This test file assumes the class to be tested is in `sds/dataset.py`.
-# 3. Run pytest from your project's root directory: `pytest`
+        dataset2 = dataset_class(src=mock_env["mock_src"], dst=mock_env["temp_dir"], data_type='image', columns_to_download=['image'])
+        dataset2.index_meta = IndexMeta(num_samples=100, path='/mock/index.parquet', lazy=False, index_type='mock')
+        dataset2.load_state_dict(state)
+        assert dataset2.epoch == 5
+        assert dataset2.sample_in_epoch == 42

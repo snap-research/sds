@@ -1,13 +1,13 @@
 import numpy as np
 from collections import Counter
 
-from sds.utils.misc import pseudo_shuffle, coprime_seed
+from sds.utils import misc
 
 
 def test_shuffle_no_collisions():
     N = 100_000
     seed = 123
-    a = coprime_seed(seed, N)
+    a = misc.coprime_seed(seed, N)
     b = 42
     perm = [(a * i + b) % N for i in range(N)]
     assert len(set(perm)) == N, "Permutation has collisions"
@@ -19,7 +19,7 @@ def test_pseudo_shuffle_full_coverage():
     seed = 1337
     all_indices = []
     for i in range(splits):
-        chunk = pseudo_shuffle(N, seed, splits, i)
+        chunk = misc.pseudo_shuffle(N, seed, splits, i)
         assert len(chunk) == N // splits or i == splits - 1
         all_indices.extend(chunk)
     assert sorted(all_indices) == list(range(N)), "Magic shuffle misses or duplicates indices"
@@ -35,7 +35,7 @@ def test_entropy_of_positions():
 
     for seed in range(num_trials):
         for i in range(splits):
-            indices = pseudo_shuffle(N, seed, splits, i)
+            indices = misc.pseudo_shuffle(N, seed, splits, i)
             base = i * (N // splits)
             for offset, val in enumerate(indices):
                 global_pos = base + offset
