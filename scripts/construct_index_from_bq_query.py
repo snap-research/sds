@@ -1,36 +1,8 @@
 # """
-# env/usage:
-# # pip install genml-training-tools -> Install this within the first hour of job start
-# # pip install --upgrade google-cloud google-cloud-bigquery google-cloud-storage db-dtypes pandas pyarrow s3fs loguru pydantic PyYAML boto3 google-cloud-bigquery-storage pyarrow
-# # clear && python construct_index_from_bq_query.py --config construct_index_from_bq_query.yaml
+# pip install genml-training-tools # Install this within the first hour of job start
+# pip install --upgrade google-cloud google-cloud-bigquery google-cloud-storage db-dtypes pandas pyarrow s3fs loguru pydantic PyYAML boto3 google-cloud-bigquery-storage pyarrow
+# clear && python construct_index_from_bq_query.py --config construct_index_from_bq_query.yaml
 # """
-
-# import os
-# import argparse
-# from urllib.parse import urlparse
-# import io
-# from typing import Iterator
-
-# import yaml
-# import s3fs
-# from google.cloud import bigquery
-# import pyarrow.parquet as pq
-# import pyarrow as pa
-# import pandas as pd
-# from loguru import logger
-# from google.cloud import bigquery_storage
-# from tqdm import tqdm
-
-# from google.cloud import bigquery
-# from genml_training_tools.gcp.credentials import get_default_credentials
-
-# """
-# env/usage:
-# # pip install genml-training-tools -> Install this within the first hour of job start
-# # pip install --upgrade google-cloud google-cloud-bigquery google-cloud-storage db-dtypes pandas pyarrow s3fs loguru pydantic PyYAML boto3 google-cloud-bigquery-storage
-# # clear && python construct_index_from_bq_query.py --config construct_index_from_bq_query.yaml
-# """
-
 import math
 import argparse
 from typing import Iterator
@@ -53,11 +25,13 @@ def construct_index_from_bq_query(
     sql_query: str,
     s3_destination_path: str,
     recompute: bool = False,
-    num_val_rows: int = 10000
+    val_ratio: float = 0.1,
+    max_num_val_rows: int = 10000,
+    s3_bucket_region: str | None = None,
 ):
     assert s3_destination_path.startswith('s3://') and s3_destination_path.endswith(".parquet"), f"Invalid S3 path: {s3_destination_path}"
     s3 = s3fs.S3FileSystem()
-    s3_fs_pa = pa.fs.S3FileSystem()
+    s3_fs_pa = pa.fs.S3FileSystem(region=s3_bucket_region)
     val_s3_destination_path = s3_destination_path.replace(".parquet", "-val.parquet")
 
     if s3.exists(s3_destination_path) and not recompute:
@@ -81,6 +55,16 @@ def construct_index_from_bq_query(
         logger.warning("Query returned 0 rows. No Parquet file will be created.")
         return
 
+    if val_ratio == 0:
+        logger.warning(f"It's very very bad not to use a validation set. This incident will be reported to Bobby.")
+        num_val_rows = 0
+    else:
+        num_val_rows = min(int(total_rows * val_ratio), max_num_val_rows)
+        logger.info(f"Will write {num_val_rows} validation rows to {val_s3_destination_path}.")
+
+    if num_val_rows > 100_000:
+        logger.warning(f"Writing so many ({num_val_rows}) validation rows is too much. This incident will be reported to Evan.")
+
     # Get the iterator for streaming results
     dataframe_iterator = results.to_dataframe_iterable(bqstorage_client=bqstorage_client)
 
@@ -103,7 +87,7 @@ def build_parquet_from_chunks(
     val_destination_path: str,
     filesystem: pa.fs.S3FileSystem,
     total_rows: int,
-    num_val_rows: int = 10000,
+    num_val_rows: int = 0,
 ) -> None:
     """
     Iterates over dataframe chunks and writes them to a single Parquet file in a given filesystem.
@@ -164,7 +148,10 @@ if __name__ == "__main__":
         bq_project=config['bq_project'],
         sql_query=config['sql_query'],
         s3_destination_path=config['s3_destination_path'],
-        recompute=config.get('recompute', False),
+        recompute=config['recompute'],
+        max_num_val_rows=config['max_num_val_rows'],
+        val_ratio=config['val_ratio'],
+        s3_bucket_region=config.get('s3_bucket_region', None),
     )
 
 #---------------------------------------------------------------------------
