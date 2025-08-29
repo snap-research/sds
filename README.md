@@ -1,78 +1,66 @@
 ## Streaming Dataset for the People
 
-A streaming dataset which fetches and yields samples on the fly, witch caching/eviction and random access. Features:
+A streaming dataset which fetches samples from anywhere and yields them on the fly, with caching/eviction and random access features:
 - *Very* flexible in terms of data sources:
-  - Can be constructed from a CSV/parquet/json index, file directory, CSV/parquet/json wildcard or "`split_file_texts.txt`"
-  - Supports remote and local data sources (e.g., S3, HTTP, local files, etc.)
+  - Can be constructed from a CSV/parquet/json index, file directory, CSV/parquet/json wildcard or good old "`split_file_texts.txt`"
+  - Supports remote and local data sources (e.g., S3, GCS, HTTP, local files, etc.)
 - Has caching and eviction logic, so that you can efficiently work with large datasets without hitting disk space limits.
 - Has standard data processing transforms for images, videos, audios, text, and metadata.
 - Supports random access (through blocking calls)!
-- Multi-stream dataloader (i.e., streaming from multiple data sources in parallel).
+- Has a built-int multi-stream dataloader (i.e., streaming from multiple data sources in parallel) with various mixing strategy between the streams.
 
 Based on: [snap-datastream](https://github.sc-corp.net/Snapchat/snap-datastream)
 
 ## Installation
 
-Clone the repository and install the requirements:
+The package is available on the corporate PyPI:
 ```bash
-pip install -r requirements.txt
+pip install streaming-dataset
 ```
 
-## Usage
-### Basic usage
+There is also a docker image for SnapVideo-V3 with streaming-dataset pre-installed: `440036398022.dkr.ecr.us-west-2.amazonaws.com/facecraft-ml:genai-video-aws-fa3-h100-torch271-126-sds`.
 
-ImageNet-1K data loading example:
-```python
-import torch
-import torchvision.transforms.functional as TVF
-from sds.dataset import StreamingDataset
-from sds.transforms import presets
+## Quickstart
+Here is an example of how to use the streaming dataset for 2 streams.
+Let's assume that the first stream is a remote S3 folder of videos, the second stream is given with index.parquet file.
 
-image_transforms = presets.create_standard_image_pipeline(
-    image_field='jpeg',
-    resolution=(256, 256),
-)
-metadata_transforms = presets.create_standard_metadata_pipeline(
-    metadata_field='meta.json',
-    class_label_metadata_field='class',
-    one_hot_encode_to_size=1000,
-    return_raw_metadata=True,
-)
-
-# The original init can take a bit of time, since it downloads the index metadata (400Mb in the case below).
-dataset = StreamingDataset(
-    # src='/nfs/datasets/imagenet-1k/train/',
-    # src='s3://snap-genvid/datasets/imagenet-1k/train/',
-    src='s3://snap-genvid/datasets/imagenet-1k/train.csv', # <= Equivalent to the above, but with precomputed index.
-    # src='s3://snap-genvid/datasets/imagenet-1k/val.csv', # <= Equivalent to the above, but with precomputed index.
-    dst='ignore/tmp',
-    data_type='image',
-    transforms=image_transforms + metadata_transforms,
-    columns_to_download=['jpeg', 'meta.json'],
-    index_col_name='index',
-    num_downloading_workers=3,
-    prefetch=100,
-    shuffle_seed=42,
-)
-sample = dataset[0] # Synchronously downloads a sample and returns it
-data_iterator = iter(torch.utils.data.DataLoader(dataset, batch_size=2, num_workers=3))
-for i in range(10):
-    batch = next(data_iterator)
-TVF.to_pil_image(batch['image'][0]) # Convert the first image to PIL for visualization
+### Preparing the data from BigQuery
+First, create a simple config for your output BQ table, i.e. `composeme-v2.yaml`:
+```yaml
+bq_project: "research-prototypes"
+sql_query: "
+  SELECT *
+  FROM `research-prototypes.generative_ai_data_platform_test.personalization_getty_dataset`
+  WHERE aes_score > 4
+    AND caption IS NOT NULL
+    AND getty_caption IS NOT NULL
+    AND getty_title IS NOT NULL
+    AND Body2DPoseHandsFace IS NOT NULL
+    AND InstanceSegmentation IS NOT NULL
+    AND FashionSegmentationImaterialist IS NOT NULL
+  ORDER BY RAND()
+  "
+s3_destination_path: s3://snap-genvid/datasets/sds-index-files/composeme-v2.parquet
+s3_bucket_region: us-west-2 # The region of the S3 bucket. Can be left empty, but would lead to an error in case of a mismatch between $AWS_REGION in the env and the actual region of the bucket.
+recompute: true # Whether to recompute the index even if it already exists in S3.
+val_ratio: 0.1 # The fraction of the dataset to use for validation dataset.
+max_num_val_rows: 10000 # The maximum number of rows in the validation dataset.
 ```
+Note: make sure that `s3_destination_path` is in the correct AWS region for your future training job.
+Otherwise, there might be problems when fetching parquet chunks from S3.
 
-### Running a simple demo
+Then, install the script env and run the BQ export script:
 ```bash
-python scripts/unpack.py s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/test_table/89c7c52fa90d4ee391ebbc39cd8ef5b9/000000000000.parquet ignore/tmp --columns_to_download data_url --index_col_name data_id --num_downloading_workers 10
+pip install genml-training-tools # Install this within the first hour of job start
+pip install --upgrade google-cloud google-cloud-bigquery google-cloud-storage db-dtypes pandas pyarrow s3fs loguru pydantic PyYAML boto3 google-cloud-bigquery-storage pyarrow
+python scripts/construct_index_from_bq_query.py composeme-v2.yaml
 ```
+It will create a single parquet index file and upload it to S3.
+It will also create a validation index file with `val_ratio` fraction of the rows (up to `max_num_val_rows`).
 
-### Constructing an index
-When training on files list directory (remote or local), it's recommended to precompute the index so that we don't need to scan the directory each time.
-You can use a command like this to do that:
-```bash
-python scripts/construct_index.py --src s3://snap-genvid/datasets/tmp/ --dst s3://snap-genvid/datasets/tmp-index.csv --tmp_dir ignore/tmp --data_type image
-```
-After the index is constructed, you can simply replace your `src` argument with the index file path, e.g. `s3://snap-genvid/datasets/tmp-index.csv`.
+### Initializing the dataset
+
+TBD :|
 
 ## How it works
 The entry point is the `StreamingDataset` class, which takes a source `src` and arguments and does the following:
@@ -80,10 +68,10 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
     - if `src` is a local or remote CSV/parquet/json file, it reads the index from there.
     - if `src` is a local or remote directory, it scans the directory and constructs an index from the files.
     - if `src` is a local or remote index wildcard (e.g., `/path/to/*.csv`), it scans the files matching the wildcard and constructs an index from them.
-2. Then, we save the index on the node as a parquet file (for memory efficient chunked reading) and return an index metadata object.
+2. Then, if it's a lazy index (controlled via `lazy_index_chunk_size`), we broadcast the index metadata to each rank. If not lazy, we save the index on the node as a parquet file (for memory efficient chunked reading) and return an index metadata object.
 3. After that, the dataset init initializes an "empty" downloader (without initializing the downloader workers). Without workers, the downloader can be used for random access queries, such as `dataset[0]`, which will download the sample with blocking.
 3. When the iterator is created, we initialize the downloader workers, which will download samples in parallel and cache them on disk.
-4. Then, each dataloading worker reads its index chunk, shuffles it and starts the generator, which yields samples one by one.
+4. Then, each dataloading worker reads its index chunk, shuffles it and starts the generator, which yields samples one by one. If it's a lazy index, then each worker would be reading index chunks with some prefetching (via downloading threads).
 5. The downloader yields the indicies of the downloaded samples. Then, we look up the sample metadata by its index and process it through a sequence of sample processing callbacks (named transforms).
 6. Sample transforms are very flexible and you can incorporate any processing logic you want, such as decoding images/videos/audios, applying augmentations, etc.
 7. The are "presets" of sample transforms which should cover 80% of the cases for image/video/text-to-video/etc use cases.
