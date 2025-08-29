@@ -138,7 +138,10 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] BQ script with exportion into a single parquet file.
 - [x] Video latents loading.
 - [x] Fixed random order.
-- [ ] Consecutive interleaved order.
+- [x] Consecutive interleaved order.
+- [ ] Allow empty columns_to_download (i.e., only metadata).
+- [ ] @beartype for streaming dataset init method.
+- [ ] For non-lazy parquet index without slicing and filtering, we don't need to reload-resave it.
 
 ### TODOs for v2.5
 - [ ] Fix TODOs in the codebase.

@@ -134,7 +134,6 @@ def _apply_crop(x: Image.Image | torch.Tensor, crop: tuple[int, int, int, int]) 
 def decode_video(
         video_file: bytes | str | None=None,
         num_frames_to_extract: int=1,
-        num_frames_total: int | None=None,
         video_decoder: VideoDecoder | None=None,
         random_offset: bool=True,
         frame_seek_timeout_sec: float=5.0,
@@ -143,6 +142,8 @@ def decode_video(
         thread_type: str | None = None,
         return_audio: bool = False,
         approx_frame_seek: bool = False,
+        real_duration: float | None = None, # If provided, we ignore the video metadata.
+        real_framerate: float | None = None, # If provided, we ignore the video metadata.
     ) -> tuple[Sequence[Image.Image], float, NDArray | None, int | None]:
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
@@ -153,17 +154,19 @@ def decode_video(
         assert isinstance(video_file, bytes) or os_utils.file_ext(video_file) in VIDEO_EXT, f"Unsupported video file type: {video_file}. Supported types: {VIDEO_EXT}."
         video_decoder = VideoDecoder(file=video_file, default_thread_type=thread_type)
         should_close_decoder = True # We should close it since it's us who opened it.
-    if num_frames_total is None:
-        num_frames_total = video_decoder.video_stream.frames # Relying on a guessed amount of frames in the video stream.
 
-    base_framerate = video_decoder.framerate
+    # Computing the full and target video durations and framerates.
+    # AV video metadata is not always accurate, so we can opt for using our pre-computed one.
+    base_framerate = video_decoder.framerate if real_framerate is None else real_framerate
     target_framerate = base_framerate if framerate is None else framerate
-
-    num_frames_to_extract = min(num_frames_total, num_frames_to_extract) if allow_shorter_videos else num_frames_to_extract
+    full_video_duration = (video_decoder.video_stream.frames / base_framerate) if real_duration is None else real_duration
     clip_duration = num_frames_to_extract / target_framerate
-    full_video_duration = num_frames_total / base_framerate
-    assert full_video_duration >= clip_duration or allow_shorter_videos, \
-        f"Video duration {full_video_duration} is shorter than the requested clip duration {clip_duration} while allow_shorter_videos={allow_shorter_videos}."
+
+    if clip_duration > full_video_duration:
+        assert allow_shorter_videos, f"Video duration {full_video_duration} is shorter than the requested clip duration {clip_duration} while allow_shorter_videos={allow_shorter_videos}."
+        clip_duration = full_video_duration
+        num_frames_to_extract = max(1, round(clip_duration * target_framerate))
+
     start_frame_timestamp = np.random.rand() * max(full_video_duration - clip_duration, 0.0) if random_offset else 0.0
     frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration, num_frames_to_extract,)
     frame_timestamps = [t for t in frame_timestamps if t <= full_video_duration] # Filter out timestamps that are beyond the video duration.

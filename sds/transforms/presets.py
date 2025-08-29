@@ -74,16 +74,21 @@ class ConvertImageToByteTensorTransform(BaseTransform):
 @beartype
 class DecodeVideoTransform(BaseTransform):
     """A video transform which decodes a video file into a list of frames."""
-    def __init__(self, input_field: str, num_frames: int, output_field: str | None = None, **decode_kwargs):
+    def __init__(self, input_field: str, num_frames: int, output_field: str | None = None, duration_field: str | None = None, framerate_field: str | None = None, **decode_kwargs):
         self.input_field = input_field
         self.output_field = output_field if output_field is not None else input_field
         self.num_frames = num_frames
+        self.duration_field = duration_field
+        self.framerate_field = framerate_field
         self.decode_kwargs = decode_kwargs
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[])
+        real_duration = float(sample[self.duration_field]) if self.duration_field is not None else None
+        real_framerate = float(sample[self.framerate_field]) if self.framerate_field is not None else None
         sample[self.output_field], _clip_duration, _waveform, _audio_sr = SDF.decode_video(
-            video_file=sample[self.input_field], num_frames_to_extract=self.num_frames, **self.decode_kwargs)
+            video_file=sample[self.input_field], num_frames_to_extract=self.num_frames,
+            real_duration=real_duration, real_framerate=real_framerate, **self.decode_kwargs)
         return sample
 
 @beartype
@@ -251,20 +256,26 @@ class DecodeVideoAndAudioTransform(BaseTransform):
     """Decodes a video file and extracts both video and audio, returning both as tensors."""
     def __init__(
             self, input_field: str, video_output_field: str, original_clip_duration_output_field: str,
-            audio_output_field: str, original_sr_output_field: str, num_frames: int, **decode_kwargs
+            audio_output_field: str, original_sr_output_field: str, num_frames: int,
+            duration_field: str | None = None, framerate_field: str | None = None, **decode_kwargs
         ):
         self.input_field = input_field
         self.video_output_field = video_output_field
         self.original_clip_duration_output_field = original_clip_duration_output_field
         self.audio_output_field = audio_output_field
         self.original_sr_output_field = original_sr_output_field
+        self.duration_field = duration_field
+        self.framerate_field = framerate_field
         self.num_frames = num_frames
         self.decode_kwargs = decode_kwargs
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[self.audio_output_field, self.original_sr_output_field])
+        real_duration = float(sample[self.duration_field]) if self.duration_field is not None else None
+        real_framerate = float(sample[self.framerate_field]) if self.framerate_field is not None else None
         video_data, clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
-            sample[self.input_field], num_frames_to_extract=self.num_frames, **self.decode_kwargs, return_audio=True)
+            sample[self.input_field], num_frames_to_extract=self.num_frames, real_duration=real_duration,
+            real_framerate=real_framerate, **self.decode_kwargs, return_audio=True)
         sample[self.video_output_field] = video_data
         sample[self.original_clip_duration_output_field] = clip_duration
         sample[self.audio_output_field] = waveform_data
