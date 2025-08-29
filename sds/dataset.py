@@ -374,7 +374,7 @@ class StreamingDataset(IterableDataset):
         if self.index_meta.lazy:
             index_chunks_it = LazyIndexIterator(
                 path=self.index_meta.path,
-                total_num_samples=self.index_meta.num_samples,
+                total_num_samples=min(self.index_meta.num_samples, self._max_size or float('inf')),
                 chunk_size=self._lazy_index_chunk_size,
                 shuffle_seed=self.shuffle_seed,
                 epoch=self.epoch,
