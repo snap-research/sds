@@ -4,6 +4,7 @@ from typing import Any, Iterator
 from dataclasses import dataclass, field
 from collections import defaultdict
 
+from beartype import beartype
 import numpy as np
 import torch
 
@@ -21,20 +22,21 @@ class ScheduleType(Enum):
     RANDOM_ORDER = 'random_order'
     FIXED_RANDOM_ORDER = 'fixed_random_order'
 
+    @beartype
     @staticmethod
-    def sample_iter_idx(schedule: "ScheduleType", num_batches_yielded: int, counts: list[int], ratios: list[float], shuffle_seed: int | None) -> int:
+    def sample_iter_idx(schedule: "ScheduleType", num_batches_yielded: int, counts: dict[int, int], ratios: dict[int, float], shuffle_seed: int | None) -> int:
         if schedule == ScheduleType.RANDOM:
-            mixing_group_idx = np.random.RandomState(num_batches_yielded + 1007 * shuffle_seed).choice(len(counts), p=ratios)
+            mixing_group_idx = np.random.RandomState(num_batches_yielded + 1007 * shuffle_seed).choice(len(counts), p=list(ratios.values()))
         else:
-            meta_iteration_size = sum(counts)
+            meta_iteration_size = sum(counts.values())
             cur_meta_iteration = num_batches_yielded // meta_iteration_size
             cur_sub_iteration = num_batches_yielded % meta_iteration_size
 
             # TODO: we shouldn't recreate the plan on each iteration, we can do this on each meta-iteration, but that makes that code a bit uglier...
             if schedule == ScheduleType.CONSECUTIVE_INTERLEAVED:
-                cur_meta_iteration_order = [idx for round_num in range(1, max(counts) + 1) for idx, count in enumerate(counts) if count >= round_num]
+                cur_meta_iteration_order = [id for round_num in range(1, max(counts.values()) + 1) for id, count in counts.items() if count >= round_num]
             else:
-                cur_meta_iteration_order: list[int] = sum([[i] * c for i, c in enumerate(counts)], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
+                cur_meta_iteration_order: list[int] = sum([[i] * c for i, c in counts.items()], start=[]) # Counts to counted idx: [1,2,3] => [0,1,1,2,2,2]
                 if schedule in (ScheduleType.RANDOM_ORDER, ScheduleType.FIXED_RANDOM_ORDER):
                     cur_shuffle_seed = (cur_meta_iteration + 1007 * shuffle_seed) if schedule == ScheduleType.RANDOM_ORDER else shuffle_seed
                     np.random.RandomState(cur_shuffle_seed).shuffle(cur_meta_iteration_order)
@@ -170,7 +172,7 @@ class MultiStreamDataLoader:
         # Unfortunately, we have a nasty "business logic" for how we mix the streams across GPUs. This makes us recompute ratios/counts for each mixing group.
         # We now have the notion of a "meta-iteration", for which we iterate over all the streams.
         self._mixing_group_counts, self._mixing_group_ratios, self._mixing_group_id_to_stream_indices = get_mixing_groups(stream_opts, counts_precision)
-        self.meta_iteration_size = sum(self._mixing_group_counts)
+        self.meta_iteration_size = sum(self._mixing_group_counts.values())
         self.shuffle_seed = shuffle_seed
         self.schedule: ScheduleType = ScheduleType(schedule)
         assert self.schedule == ScheduleType.RANDOM or self.meta_iteration_size < 100_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
@@ -258,14 +260,15 @@ def inf_loop_dataloader(dataloader: torch.utils.data.DataLoader) -> Iterator[dic
 #----------------------------------------------------------------------------
 # Helper misc functions.
 
-def get_mixing_groups(stream_opts: list[StreamOptions], counts_precision: float) -> list[int]:
+@beartype
+def get_mixing_groups(stream_opts: list[StreamOptions], counts_precision: int) -> tuple[dict[int, int], dict[int, float], dict[int, list[int]]]:
     stream_id_to_group_id: dict[int, int] = {i: s.mixing_group_id for i, s in enumerate(stream_opts)}
     group_id_to_stream_indicies: dict[int, list[int]] = defaultdict(list)
     for stream_id, group_id in stream_id_to_group_id.items():
         group_id_to_stream_indicies[group_id].append(stream_id)
-    group_ratios = [sum(stream_opts[i].ratio for i in group) for group in group_id_to_stream_indicies.values()]
-    assert all(r > 0 for r in group_ratios), f"All groups must have a positive ratio. Found: {group_ratios} for stream_opts: {stream_opts}"
-    group_counts = misc.probabilities_to_counts(group_ratios, precision=counts_precision)
+    group_ratios = {gid: sum(stream_opts[i].ratio for i in g) for gid, g in group_id_to_stream_indicies.items()}
+    assert all(r > 0 for r in group_ratios.values()), f"All groups must have a positive ratio. Found: {group_ratios} for stream_opts: {stream_opts}"
+    group_counts = {gid: p for gid, p in zip(group_ratios, misc.probabilities_to_counts(list(group_ratios.values()), precision=counts_precision))}
     return group_counts, group_ratios, group_id_to_stream_indicies
 
 #----------------------------------------------------------------------------
