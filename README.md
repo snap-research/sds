@@ -116,8 +116,9 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Video + .wav files loading (now we only support video files with embedded audio).
 - [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 - [ ] For non-lazy parquet index without slicing and filtering, we don't need to reload-resave it.
-- [ ] First select a caption embedding, then download the selected one for traffic optimization.
 - [ ] Fix the current unit tests.
+- [ ] First select a caption embedding, then download the selected one for traffic optimization.
+- [ ] We can download video chunks from S3 give the random offset/num frames we need.
 
 ### TODOs for v1.5:
 - [ ] The logic for resetting the downloader after each epoch is hacky. I dont think we should do that.

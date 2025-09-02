@@ -45,6 +45,7 @@ class ScheduleType(Enum):
 
         return mixing_group_idx
 
+
 class Batch(dict):
     """A clumsy dict wrapper to augment batches with additional metadata."""
     def __init__(self, raw_batch: dict, stream_name: str | None = None, num_accum_rounds_left: int = 0, data_type: DataSampleType | None=None):
