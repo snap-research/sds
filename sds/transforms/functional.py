@@ -228,19 +228,20 @@ def resample_waveform(waveform: torch.Tensor, **resampling_kwargs) -> torch.Tens
 def resize_waveform(waveform: torch.Tensor, target_length: int, mode: str='pad_or_trim') -> torch.Tensor:
     """
     Pads or trims the waveform to the target length.
+    Assumes the shape is [..., num_channels, time]
     TODO: should we do interpolation?
     """
     assert mode in ['pad_or_trim'], f"Unsupported mode: {mode}. Supported modes: ['pad_or_trim']."
-    assert waveform.ndim == 2, f"Waveform must be 2D, got shape {waveform.shape}."
-    if waveform.shape[1] == target_length:
+
+    if waveform.shape[-1] == target_length:
         return waveform
-    elif waveform.shape[1] < target_length:
+    elif waveform.shape[-1] < target_length:
         # Pad the waveform to the target length
-        padding = target_length - waveform.shape[1]
-        return torch.nn.functional.pad(waveform, (0, padding), mode='constant', value=0.0)
+        padding_size = target_length - waveform.shape[-1]
+        padding = torch.zeros((*waveform.shape[:-1], padding_size), dtype=waveform.dtype, device=waveform.device)
+        return torch.cat([waveform, padding], dim=-1) # [..., num_channels, target_length]
     else:
-        # Trim the waveform to the target length
-        return waveform[:, :target_length]
+        return waveform[..., :target_length] # [..., num_channels, target_length]
 
 #----------------------------------------------------------------------------
 # VAE latents processing functions.
