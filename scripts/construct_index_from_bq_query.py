@@ -1,11 +1,7 @@
-# """
-# pip install genml-training-tools # Install this within the first hour of job start
-# pip install --upgrade google-cloud google-cloud-bigquery google-cloud-storage db-dtypes pandas pyarrow s3fs loguru pydantic PyYAML boto3 google-cloud-bigquery-storage pyarrow
-# clear && python construct_index_from_bq_query.py --config construct_index_from_bq_query.yaml
-# """
-import math
-import argparse
-from typing import Iterator
+import os, math, time, argparse, hashlib
+from uuid import uuid4
+from datetime import datetime, timedelta, timezone
+from typing import Iterator, Optional, Tuple
 
 import yaml
 import s3fs
@@ -14,71 +10,60 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from google.cloud import bigquery, bigquery_storage
 from loguru import logger
-from tqdm import tqdm
 
 from genml_training_tools.gcp.credentials import get_default_credentials
 
-#---------------------------------------------------------------------------
 
-def construct_index_from_bq_query(
-    bq_project: str,
-    sql_query: str,
-    s3_destination_path: str,
-    recompute: bool = False,
-    val_ratio: float = 0.1,
-    max_num_val_rows: int = 10000,
-    s3_bucket_region: str | None = None,
-):
-    assert s3_destination_path.startswith('s3://') and s3_destination_path.endswith(".parquet"), f"Invalid S3 path: {s3_destination_path}"
-    s3 = s3fs.S3FileSystem()
-    s3_fs_pa = pa.fs.S3FileSystem(region=s3_bucket_region)
-    val_s3_destination_path = s3_destination_path.replace(".parquet", "-val.parquet")
+#----------------------------------------------------------
+# Small helpers
 
-    if s3.exists(s3_destination_path) and not recompute:
-        logger.info(f"File already exists at {s3_destination_path}. Skipping computation.")
-        return
-
-    # Set up BigQuery clients
+def get_bq_clients(project: str, location: str) -> Tuple[bigquery.Client, bigquery_storage.BigQueryReadClient]:
     creds, _ = get_default_credentials()
-    bq_client = bigquery.Client(credentials=creds, project=bq_project)
-    bqstorage_client = bigquery_storage.BigQueryReadClient(credentials=creds)
-
-    logger.info("Starting BigQuery query execution...")
-    query_job = bq_client.query(sql_query)
-    results = query_job.result() # This call blocks until the query completes and metadata is available.
-
-    # Now we have the total row count for a meaningful progress bar!
-    total_rows = results.total_rows
-    logger.info(f"Query finished. Found {total_rows} rows to process.")
-
-    if total_rows == 0:
-        logger.warning("Query returned 0 rows. No Parquet file will be created.")
-        return
-
-    if val_ratio == 0:
-        logger.warning(f"It's very very bad not to use a validation set. This incident will be reported to Bobby.")
-        num_val_rows = 0
-    else:
-        num_val_rows = min(int(total_rows * val_ratio), max_num_val_rows)
-        logger.info(f"Will write {num_val_rows} validation rows to {val_s3_destination_path}.")
-
-    if num_val_rows > 100_000:
-        logger.warning(f"Writing so many ({num_val_rows}) validation rows is too much. This incident will be reported to Evan.")
-
-    # Get the iterator for streaming results
-    dataframe_iterator = results.to_dataframe_iterable(bqstorage_client=bqstorage_client)
-
-    # Stream data directly to the S3 path
-    build_parquet_from_chunks(
-        dataframe_chunks_iterator=dataframe_iterator,
-        destination_path=s3_destination_path.replace("s3://", ""),
-        val_destination_path=val_s3_destination_path.replace("s3://", ""),
-        filesystem=s3_fs_pa,
-        total_rows=total_rows,
-        num_val_rows=num_val_rows,
+    return (
+        bigquery.Client(credentials=creds, project=project, location=location),
+        bigquery_storage.BigQueryReadClient(credentials=creds),
     )
 
-    logger.info(f"Successfully wrote {total_rows} rows to {s3_destination_path}")
+
+def get_s3_filesystems(region: Optional[str]) -> Tuple[s3fs.S3FileSystem, pa.fs.S3FileSystem]:
+    return s3fs.S3FileSystem(), pa.fs.S3FileSystem(region=region)
+
+
+def unique_tmp_table_id(project: str, dataset: str, sql_query: str) -> str:
+    salt = f"{time.time_ns()}:{os.getpid()}:{uuid4().hex}"
+    h = hashlib.sha256((sql_query + salt).encode()).hexdigest()[:16]
+    return f"{project}.{dataset}.tmp_{h}"
+
+
+def ensure_temp_table_with_ttl(bq_client: bigquery.Client, table_id: str, ttl_hours: int = 6) -> None:
+    # Pre-create with expiration; ok if it already exists—job uses WRITE_TRUNCATE anyway.
+    table = bigquery.Table(table_id)
+    table.expires = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+    try:
+        bq_client.create_table(table)
+    except Exception:
+        pass  # benign: dataset might auto-expire or table already exists
+
+
+def run_query_to_table(bq_client: bigquery.Client, sql: str, table_id: str) -> None:
+    cfg = bigquery.QueryJobConfig(destination=table_id,
+                                  write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE)
+    logger.info("Starting BigQuery query execution...")
+    bq_client.query(sql, job_config=cfg).result()
+    logger.info("BigQuery job completed.")
+
+
+def table_row_count(bq_client: bigquery.Client, table_id: str) -> int:
+    return int(bq_client.get_table(table_id).num_rows or 0)
+
+
+def dataframe_iter_from_table(
+    bq_client: bigquery.Client,
+    bqstorage_client: bigquery_storage.BigQueryReadClient,
+    table_id: str,
+) -> Iterator[pd.DataFrame]:
+    table = bq_client.get_table(table_id)
+    return bq_client.list_rows(table).to_dataframe_iterable(bqstorage_client=bqstorage_client)
 
 
 def build_parquet_from_chunks(
@@ -89,69 +74,125 @@ def build_parquet_from_chunks(
     total_rows: int,
     num_val_rows: int = 0,
 ) -> None:
-    """
-    Iterates over dataframe chunks and writes them to a single Parquet file in a given filesystem.
-    """
-    val_rows_ratio = num_val_rows / total_rows
-    num_val_rows_written = 0
-    assert val_rows_ratio <= 0.5, f"num_val_rows ({num_val_rows}) must be less than half of total rows ({total_rows})."
+    val_ratio = (num_val_rows / total_rows) if total_rows else 0.0
+    assert val_ratio <= 0.5, f"num_val_rows ({num_val_rows}) must be < half of total rows ({total_rows})."
 
-    writer = None
-    val_writer = None
+    writer = val_writer = None
+    from tqdm import tqdm
     pbar = tqdm(total=total_rows, unit="rows", desc="Writing to S3")
 
     for chunk_df in dataframe_chunks_iterator:
         if chunk_df.empty:
-            logger.warning("Skipping an empty dataframe chunk.")
             continue
-
         table_chunk = pa.Table.from_pandas(chunk_df)
         if writer is None:
-            writer_kwargs = dict(schema=table_chunk.schema, compression='snappy', filesystem=filesystem)
-            writer = pq.ParquetWriter(destination_path, **writer_kwargs)
-            val_writer = pq.ParquetWriter(val_destination_path, **writer_kwargs) if num_val_rows > 0 else None
+            kw = dict(schema=table_chunk.schema, compression='snappy', filesystem=filesystem)
+            writer = pq.ParquetWriter(destination_path, **kw)
+            val_writer = pq.ParquetWriter(val_destination_path, **kw) if num_val_rows > 0 else None
 
-        # Determine the amount of validation data to write from this chunk
-        num_val_chunk_rows = math.ceil(len(chunk_df) * val_rows_ratio)
-        if val_writer is not None and num_val_chunk_rows > 0:
-            val_table_chunk = table_chunk.slice(0, num_val_chunk_rows)
-            val_writer.write_table(table=val_table_chunk)
-            num_val_rows_written += num_val_chunk_rows
-            table_chunk = table_chunk.slice(num_val_chunk_rows)
+        n_val = min(num_val_rows, math.ceil(len(chunk_df) * val_ratio))
+        if val_writer is not None and n_val > 0:
+            val_writer.write_table(table_chunk.slice(0, n_val))
+            num_val_rows -= n_val
+            table_chunk = table_chunk.slice(n_val)
+            if num_val_rows <= 0:
+                val_writer.close()
+                val_writer = None
 
-        if num_val_rows_written >= num_val_rows and val_writer is not None:
-            logger.info(f"Wrote {num_val_rows_written} validation rows to {val_destination_path}. Closing validation writer.")
-            val_writer.close()
-            val_writer = None
-
-        writer.write_table(table=table_chunk)
+        writer.write_table(table_chunk)
         pbar.update(len(chunk_df))
-
-    if writer is None:
-        logger.warning("The dataframe iterator was empty. No file was created.")
 
     if writer:
         writer.close()
 
-#---------------------------------------------------------------------------
-# Config utils.
 
-if __name__ == "__main__":
+#----------------------------------------------------------
+# Orchestration
+
+def construct_index_from_bq_query(
+    bq_project: str,
+    sql_query: str,
+    s3_destination_path: str,
+    recompute: bool = False,
+    val_ratio: float = 0.1,
+    max_num_val_rows: int = 10000,
+    s3_bucket_region: Optional[str] = None,
+    bq_dataset_for_temp: str = "scratch",
+    bq_location: str = "US",
+):
+    assert s3_destination_path.startswith('s3://') and s3_destination_path.endswith(".parquet"), \
+        f"Invalid S3 path: {s3_destination_path}"
+
+    s3, s3_fs_pa = get_s3_filesystems(s3_bucket_region)
+    val_s3_path = s3_destination_path.replace(".parquet", "-val.parquet")
+
+    if s3.exists(s3_destination_path) and not recompute:
+        logger.info(f"File already exists at {s3_destination_path}. Skipping computation.")
+        return
+
+    bq_client, bqstorage_client = get_bq_clients(bq_project, bq_location)
+    tmp_table = unique_tmp_table_id(bq_project, bq_dataset_for_temp, sql_query)
+
+    # Create temp table with TTL; always cleanup in finally.
+    ensure_temp_table_with_ttl(bq_client, tmp_table, ttl_hours=6)
+    try:
+        run_query_to_table(bq_client, sql_query, tmp_table)
+
+        total_rows = table_row_count(bq_client, tmp_table)
+        logger.info(f"Query finished. Found {total_rows} rows to process.")
+        if total_rows == 0:
+            logger.warning("Query returned 0 rows. No Parquet file will be created.")
+            return
+
+        num_val_rows = 0
+        if val_ratio == 0:
+            logger.warning("No validation set requested. This incident will be reported to Bobby.")
+        else:
+            num_val_rows = min(int(total_rows * val_ratio), max_num_val_rows)
+            if num_val_rows > 100_000:
+                logger.warning(f"Writing so many ({num_val_rows}) validation rows is too much. This incident will be reported to Evan.")
+            logger.info(f"Will write {num_val_rows} validation rows to {val_s3_path}.")
+
+        df_iter = dataframe_iter_from_table(bq_client, bqstorage_client, tmp_table)
+        build_parquet_from_chunks(
+            dataframe_chunks_iterator=df_iter,
+            destination_path=s3_destination_path.replace("s3://", ""),
+            val_destination_path=val_s3_path.replace("s3://", ""),
+            filesystem=s3_fs_pa,
+            total_rows=total_rows,
+            num_val_rows=num_val_rows,
+        )
+
+        logger.info(f"Successfully wrote {total_rows} rows to {s3_destination_path}")
+    finally:
+        try:
+            bq_client.delete_table(tmp_table, not_found_ok=True)
+            logger.info(f"Deleted temp table {tmp_table}.")
+        except Exception as e:
+            logger.warning(f"Failed to delete temp table {tmp_table}: {e}")
+
+
+#----------------------------------------------------------
+# CLI
+
+def main():
     parser = argparse.ArgumentParser(description="Prepare BigQuery tables and upload to S3.")
     parser.add_argument('config', type=str, help='Path to the YAML configuration file.')
     args = parser.parse_args()
-
     with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
 
     construct_index_from_bq_query(
-        bq_project=config['bq_project'],
-        sql_query=config['sql_query'],
-        s3_destination_path=config['s3_destination_path'],
-        recompute=config['recompute'],
-        max_num_val_rows=config['max_num_val_rows'],
-        val_ratio=config['val_ratio'],
-        s3_bucket_region=config.get('s3_bucket_region', None),
+        bq_project=cfg['bq_project'],
+        sql_query=cfg['sql_query'],
+        s3_destination_path=cfg['s3_destination_path'],
+        recompute=cfg.get('recompute', False),
+        max_num_val_rows=cfg.get('max_num_val_rows', 10000),
+        val_ratio=cfg.get('val_ratio', 0.1),
+        s3_bucket_region=cfg.get('s3_bucket_region'),
+        bq_dataset_for_temp=cfg.get('bq_dataset_for_temp', 'scratch'),
+        bq_location=cfg.get('bq_location', 'US'),
     )
 
-#---------------------------------------------------------------------------
+if __name__ == "__main__":
+    main()
