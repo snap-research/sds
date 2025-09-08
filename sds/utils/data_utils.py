@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 
+from beartype import beartype
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.fs as fs
@@ -159,7 +160,8 @@ def count_parquet_rows_in_s3(s3_path: str, verbose: bool = True) -> int:
 
         return sum(results)
 
-def maybe_run_sql_query_on_dataframe(df: pd.DataFrame, sql_query: str | None = None) -> pd.DataFrame:
+@beartype
+def maybe_run_sql_query_on_dataframe(df: pd.DataFrame, sql_query: str | None = None, num_threads: int | None=None) -> pd.DataFrame:
     """
     Safely applies a SQL query to a pandas DataFrame using an isolated DuckDB connection.
 
@@ -189,6 +191,9 @@ def maybe_run_sql_query_on_dataframe(df: pd.DataFrame, sql_query: str | None = N
     # 2. Perform original input validations
     assert isinstance(df, pd.DataFrame), f"SQL filtering is only supported for pandas DataFrames, got {type(df)}."
     assert DATAFRAME_KEYWORD in sql_query, f"SQL query must contain '{DATAFRAME_KEYWORD}' to indicate the DataFrame to operate on. Got: {sql_query}"
+
+    if num_threads is not None:
+        sql_query = f"SET threads = {num_threads}; {sql_query}"  # Limit DuckDB to 4 threads to avoid oversubscription
 
     logger.debug(f"Preparing to run an SQL query. Shape before: {df.shape}. Query: \"{sql_query}\"")
 
