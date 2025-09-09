@@ -12,6 +12,7 @@ from collections.abc import Callable
 from beartype import beartype
 import numpy as np
 import pandas as pd
+import torch
 from torch.utils.data import IterableDataset
 from loguru import logger
 
@@ -81,7 +82,7 @@ class StreamingDataset(IterableDataset):
         self.src: str = src
         self.dst: str = dst
         self.data_type: DataSampleType = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
-        self.shuffle_seed: int | None = shuffle_seed
+        self.shuffle_seed: int | None = build_shuffle_seed(shuffle_seed)
         self.transforms = transforms or []
         self.columns_to_download = columns_to_download
         self.num_downloading_workers = num_downloading_workers
@@ -120,7 +121,7 @@ class StreamingDataset(IterableDataset):
         self.epoch = 0
         self.sample_in_epoch = 0 # What sample idx we are in the current epoch.
 
-        self.build_index() # Build the index metadata. TODO: it's slow sometimes, so maybe we should to it lazily.
+        self.build_index() # Build the index metadata.
         self._index_partition = None # Index will be initialized in __iter__(), when we know the workers.
 
         self.downloader = self.init_downloader() # Initialize the downloader to download the shards in parallel.
@@ -525,5 +526,20 @@ def apply_transforms_recursively(sample: SampleData, transforms: list[SampleTran
     # Otherwise, it's a single sample.
     else:
         yield from apply_transforms_recursively(result, transforms[1:])
+
+#----------------------------------------------------------------------------
+
+@beartype
+def build_shuffle_seed(seed: int | None) -> int | None:
+    """
+    If
+    """
+    if seed is None or seed >= 0: return seed
+
+    assert seed == -1, f"Invalid shuffle seed: {seed}. Must be None, -1, or a non-negative integer."
+    seed = int(hashlib.sha256(os.urandom(16)).hexdigest(), 16) % (2 ** 32)
+    logger.info(f"Broadcasting a random shuffle seed: {seed} across all ranks.")
+    seed = dist_utils.broadcast_object(seed, src=0)
+    return seed
 
 #----------------------------------------------------------------------------

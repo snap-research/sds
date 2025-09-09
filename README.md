@@ -22,6 +22,8 @@ There is also a docker image for SnapVideo-V3 with streaming-dataset pre-install
 Here is an example of how to use the streaming dataset for 2 streams.
 Let's assume that the first stream is a remote S3 folder of videos, the second stream is given with index.parquet file.
 
+For the first stream, we would be loading it directly from S3, but for the second stream, we'll go through the process of preparing the data from BigQuery.
+
 ### Preparing the data from BigQuery
 First, create a simple config for your output BQ table, i.e. `composeme-v2.yaml`:
 ```yaml
@@ -58,7 +60,8 @@ It will also create a validation index file with `val_ratio` fraction of the row
 
 ### Initializing the dataset
 
-TBD :|
+In this example, we'll use 2 streams:
+
 
 ## How it works
 The entry point is the `StreamingDataset` class, which takes a source `src` and arguments and does the following:
@@ -117,8 +120,11 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 - [ ] For non-lazy parquet index without slicing and filtering, we don't need to reload-resave it.
 - [ ] Fix the current unit tests.
-- [ ] First select a caption embedding, then download the selected one for traffic optimization.
+- [ ] First select a caption embedding, then download the selected one for traffic optimization. Could it be done via "pre-download transforms".
 - [ ] We can download video chunks from S3 give the random offset/num frames we need.
+- [ ] How can we reweight the index during training? A straightforward way would be randomly filtering out samples in the index via SQL queries. But maybe, we can have a reweighting_fn as an input or a weight column in the index?
+- [ ] Our caching logic is broken: we think we've downloaded a sample and occupied some disk space, but it was already there. This makes us delete samples thinking that we need to free up space.
+- [x] Support shuffle_seed = -1.
 
 ### TODOs for v1.5:
 - [ ] The logic for resetting the downloader after each epoch is hacky. I dont think we should do that.
