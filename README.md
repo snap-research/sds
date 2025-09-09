@@ -114,6 +114,9 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Consecutive interleaved order.
 - [x] Put on our corp pypi.
 - [x] Evict samples inside random access queries as well.
+- [x] Our caching logic is broken: we think we've downloaded a sample and occupied some disk space, but it was already there. This makes us delete samples thinking that we need to free up space.
+- [x] Support shuffle_seed = -1.
+- [x] Audio normalization.
 - [ ] Tutorial/usage examples
 - [ ] Documentation
 - [ ] Video + .wav files loading (now we only support video files with embedded audio).
@@ -123,8 +126,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] First select a caption embedding, then download the selected one for traffic optimization. Could it be done via "pre-download transforms".
 - [ ] We can download video chunks from S3 give the random offset/num frames we need.
 - [ ] How can we reweight the index during training? A straightforward way would be randomly filtering out samples in the index via SQL queries. But maybe, we can have a reweighting_fn as an input or a weight column in the index?
-- [x] Our caching logic is broken: we think we've downloaded a sample and occupied some disk space, but it was already there. This makes us delete samples thinking that we need to free up space.
-- [x] Support shuffle_seed = -1.
+- [ ] Support spawn start method for dataloader workers.
 
 ### TODOs for v1.5:
 - [ ] The logic for resetting the downloader after each epoch is hacky. I dont think we should do that.
@@ -140,6 +142,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Some race conditions might happen, when someone is evicting/downloading a sample with a downloader, while someone else is doing this via random access, since random access breaks the non-overlapping assumption. Also, we don't free the disk space used by random access samples. We should probably lock the downloader (among all the node workers?!) during random access queries.
 - [ ] How to support multiple instances of the *same* dataset in a single process? That might lead to race conditions in downloading/eviction.
 - [ ] We likely also need some node-level file lock to keep disk usage information for caching, since each new iterator instance is thinking that it's starting from scratch.
+- [ ] Plot the job cost in terms of downloading, given the number of requests, and bytes downloaded.
 
 ### TODOs for v2
 - [ ] Fix TODOs in the codebase (i.e. grep for "TODO" and fix).

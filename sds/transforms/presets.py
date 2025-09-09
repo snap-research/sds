@@ -202,6 +202,15 @@ class ResizeAudioTransform(BaseTransform):
         sample[self.output_field] = waveform
         return sample
 
+class NormalizeAudioTransform(BaseTransform):
+    """Normalizes the audio waveform to have maximum absolute value of 0.95."""
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: torch.Tensor}, absent=[])
+        waveform = sample[self.input_field]
+        max_val = waveform.abs().max()
+        sample[self.output_field] = (waveform / max_val * 0.95) if max_val > 0 else waveform
+        return sample
+
 #----------------------------------------------------------------------------
 # VAE latents processing transforms.
 
@@ -692,12 +701,10 @@ def create_standard_joint_video_audio_pipeline(
     resolution: tuple[int, int], # Target spatial video resolution.
     decode_kwargs={}, # Extra decoding parameters for DecodeAudioFromVideoTransform
     mono_audio: bool = True,
+    normalize_audio: bool = True, # Whether to normalize the audio by waveform / waveform.abs().max() * 0.95
     target_audio_sr: int = 16000, # Audio sampling rate
     resize_kwargs: dict = {}, # Extra resizing parameters for ResizeVideoTransform
 ):
-    """
-    Creates a standard joint audio/video dataloading transform, which loads and decodes a video and audio together.
-    """
     transforms: Sequence[SampleTransform] = [
         RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
         DecodeVideoAndAudioTransform(
@@ -721,6 +728,8 @@ def create_standard_joint_video_audio_pipeline(
     ]
     if mono_audio:
         transforms.append(AverageAudioTransform(input_field='audio'))
+    if normalize_audio:
+        transforms.append(NormalizeAudioTransform(input_field='audio'))
 
     return transforms
 
