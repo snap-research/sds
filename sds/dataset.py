@@ -443,9 +443,14 @@ class LazyIndexIterator:
         for chunk_id in chunk_order:
             start_sample_id = chunk_id * self.chunk_size_refined + self.partition_start_sample_id
             end_sample_id = min(start_sample_id + self.chunk_size_refined, total_num_samples)
-            sample_offset += end_sample_id - start_sample_id
-            if sample_offset >= sample_in_epoch: # Only schedule chunks that are after the current sample in the epoch.
+            cur_chunk_size = end_sample_id - start_sample_id
+            if sample_in_epoch < sample_offset + cur_chunk_size:
+                # Only schedule chunks that are after the current sample in the epoch.
+                start_sample_id += max(0, sample_in_epoch - sample_offset)
                 self._pool.schedule_task(self._fetch_chunk, task_input={'start': start_sample_id, 'end': end_sample_id})
+            else:
+                logger.debug(f'[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Skipping chunk [{start_sample_id}:{end_sample_id}] as it is before sample_in_epoch {sample_in_epoch}.')
+            sample_offset += cur_chunk_size
 
     def _fetch_chunk(self, task_input: dict[str, int]) -> pd.DataFrame:
         start_id = task_input['start']
