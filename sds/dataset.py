@@ -343,9 +343,9 @@ class StreamingDataset(IterableDataset):
         scheduling_kwargs = dict(scheduled_samples=scheduled_samples, shuffle_seed=self.shuffle_seed, epoch=self.epoch, global_worker_rank=global_worker_rank)
         self._schedule_downloads_(next(index_iterator), **scheduling_kwargs)
 
-        for sample_key, total_sample_size in self.downloader.yield_completed_keys():
+        for sample_key, (total_sample_size, total_download_size) in self.downloader.yield_completed():
             self._stored_sample_keys.append(sample_key)
-            self._worker_disk_usage += total_sample_size
+            self._worker_disk_usage += total_download_size
             scheduled_samples[sample_key][SAMPLE_DISK_USAGE_FIELD] = total_sample_size
 
             try:
@@ -538,7 +538,8 @@ def build_shuffle_seed(seed: int | None) -> int | None:
 
     assert seed == -1, f"Invalid shuffle seed: {seed}. Must be None, -1, or a non-negative integer."
     seed = int(hashlib.sha256(os.urandom(16)).hexdigest(), 16) % (2 ** 32)
-    logger.info(f"Broadcasting a random shuffle seed: {seed} across all ranks.")
+    if dist_utils.is_main_process():
+        logger.info(f"Broadcasting a random shuffle seed: {seed} across all ranks.")
     seed = dist_utils.broadcast_object(seed, src=0)
     return seed
 

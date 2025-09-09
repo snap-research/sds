@@ -64,11 +64,9 @@ def test_prefetch_behavior(local_dirs):
         downloader.schedule_task(f, [src], [dst])
 
     completed = []
-    for key in downloader.yield_completed_keys():
+    for key, _result in downloader.yield_completed():
         completed.append(key)
-        assert len(completed) <= 5 or all(
-            os.path.exists(os.path.join(dst_dir, f"{key}.txt")) for key in completed
-        )
+        assert len(completed) <= 5 or all(os.path.exists(os.path.join(dst_dir, f"{key}.txt")) for key in completed)
 
 # Mixed Local + S3
 def test_mixed_sources(local_dirs):
@@ -125,6 +123,6 @@ def test_failed_downloads_do_not_crash(tmpdir, bad_url):
     assert not os.path.exists(dst_path)
 
     # Optionally yield and check failure is reported correctly
-    for result_key in downloader.yield_completed_keys():
+    for result_key, _result in downloader.yield_completed():
         # It should NOT yield the key of a failed download
         assert result_key != "bad_s3"

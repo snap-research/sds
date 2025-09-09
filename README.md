@@ -123,7 +123,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] First select a caption embedding, then download the selected one for traffic optimization. Could it be done via "pre-download transforms".
 - [ ] We can download video chunks from S3 give the random offset/num frames we need.
 - [ ] How can we reweight the index during training? A straightforward way would be randomly filtering out samples in the index via SQL queries. But maybe, we can have a reweighting_fn as an input or a weight column in the index?
-- [ ] Our caching logic is broken: we think we've downloaded a sample and occupied some disk space, but it was already there. This makes us delete samples thinking that we need to free up space.
+- [x] Our caching logic is broken: we think we've downloaded a sample and occupied some disk space, but it was already there. This makes us delete samples thinking that we need to free up space.
 - [x] Support shuffle_seed = -1.
 
 ### TODOs for v1.5:

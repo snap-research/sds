@@ -142,10 +142,10 @@ def test_iteration_flow(mock_env, dataset_class):
         dataset.index_meta = IndexMeta(num_samples=3, path='/mock/index.parquet', lazy=False, index_type='mock')
 
         mock_downloader = MagicMock()
-        mock_downloader.yield_completed_keys.return_value = [
-            ('sample_0', 600), # Disk usage: 600 bytes
-            ('sample_1', 600), # Disk usage: 1200 bytes > 1024, should evict sample_0
-            ('sample_2', 300), # Disk usage: 600 + 300 = 900 bytes
+        mock_downloader.yield_completed.return_value = [
+            ('sample_0', (600, 600)), # Disk usage: 600 bytes
+            ('sample_1', (600, 600)), # Disk usage: 1200 bytes > 1024, should evict sample_0
+            ('sample_2', (300, 300)), # Disk usage: 600 + 300 = 900 bytes
         ].__iter__()
         mock_downloader.get_num_pending_tasks.return_value = 1000
         dataset.downloader = mock_downloader
@@ -202,7 +202,7 @@ def test_transforms(mock_env, dataset_class):
         )
         dataset_gen.index_meta = IndexMeta(num_samples=1, path='/mock/index.parquet', lazy=False, index_type='mock')
         dataset_gen.downloader = MagicMock()
-        dataset_gen.downloader.yield_completed_keys.return_value = [('sample_0', 100)].__iter__()
+        dataset_gen.downloader.yield_completed.return_value = [('sample_0', (100, 100))].__iter__()
         mock_index_df = pd.DataFrame([{'index': 'sample_0', 'image': 'url0'}])
         # CORRECTED: Patch 'load_index_partition' in the module where it's used
         with patch('sds.dataset.load_index_partition', return_value=mock_index_df):

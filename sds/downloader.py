@@ -98,11 +98,10 @@ class ParallelDownloader:
                 except Exception as e:
                     logger.error(f"Failed to remove file {dst}: {e}")
 
-    def yield_completed_keys(self) -> Generator:
+    def yield_completed(self) -> Generator:
         for result in self.thread_pool.yield_completed():
             if result["success"]:
-                total_downloaded_size = result['task_output']
-                yield (result['task_input'].key, total_downloaded_size)
+                yield (result['task_input'].key, result['task_output'])
             else:
                 logger.error(f"Download failed: {result}")
                 self._clean_failed_download(result['task_input'])
@@ -115,19 +114,20 @@ class ParallelDownloader:
 
 #----------------------------------------------------------------------------
 
-def run_downloading_task(task: DownloadingTask) -> float:
+def run_downloading_task(task: DownloadingTask) -> tuple[float, float]:
     """
-    Returns the total size of downloaded files in bytes.
+    Returns the total size of files in bytes, and the amount of data that has actually been downloaded (not skipped).
     """
-    total_size = 0
+    existing_size = 0
+    downloaded_size = 0
     for url, dst in zip(task.source_urls, task.destinations):
         prefix = urllib.parse.urlparse(url).scheme
         cur_dst_size = os.path.getsize(dst) if os.path.exists(dst) else 0
         if task.skip_if_exists and cur_dst_size > 0:
-            total_size += cur_dst_size
+            existing_size += cur_dst_size
             continue
         task.downloaders[prefix].download(url, dst, timeout=task.timeout)
-        total_size += os.path.getsize(dst)
-    return total_size
+        downloaded_size += os.path.getsize(dst)
+    return (existing_size + downloaded_size), downloaded_size
 
 #----------------------------------------------------------------------------
