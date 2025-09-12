@@ -5,6 +5,7 @@ import types
 import hashlib
 import base64
 import traceback
+import faulthandler
 from typing import Any, Iterator
 from collections import deque
 from collections.abc import Callable
@@ -12,7 +13,6 @@ from collections.abc import Callable
 from beartype import beartype
 import numpy as np
 import pandas as pd
-import torch
 from torch.utils.data import IterableDataset
 from loguru import logger
 
@@ -107,6 +107,8 @@ class StreamingDataset(IterableDataset):
         self._num_random_access_retries = num_random_access_retries
         self._print_exceptions = print_exceptions
         self._print_traceback = print_traceback
+        if self._print_traceback:
+            faulthandler.enable() # Printing all the traceback we can.
 
         # Some optimization parameters.
         self._gc = os_utils.TimeBasedGarbageCollector(interval_seconds=30)

@@ -6,6 +6,7 @@ from typing import BinaryIO, Callable, List, Union
 
 import av
 from PIL import Image
+from loguru import logger
 
 
 def identity_transform(x):
@@ -172,12 +173,12 @@ class VideoDecoder:
         try:
             transformed_frame = transform(frame)
         except Exception as e:
-            print_message = f"An exception occurred in VideoDecoder while transforming a frame in {self.file}, "
+            error_message = f"An exception occurred in VideoDecoder while transforming a frame in {self.file}, "
             exception_message = str(e)
             exception_trace_string = traceback.format_exc()
-            print_message += f"Exception message: {exception_message}\n"
-            print_message += f"Exception trace:\n{exception_trace_string}"
-            print(print_message, file=sys.stderr, flush=True)
+            error_message += f"Exception message: {exception_message}\n"
+            error_message += f"Exception trace:\n{exception_trace_string}"
+            logger.error(error_message, file=sys.stderr, flush=True)
             raise e
 
         return transformed_frame
@@ -422,12 +423,12 @@ class VideoDecoder:
                     else:
                         continue
                 except Exception as e:
-                    print_message = f"An exception occurred in VideoDecoder while decoding frames in {self.file}, "
+                    error_message = f"An exception occurred in VideoDecoder while decoding frames in {self.file}, "
                     exception_message = str(e)
                     exception_trace_string = traceback.format_exc()
-                    print_message += f"Exception message: {exception_message}\n"
-                    print_message += f"Exception trace:\n{exception_trace_string}"
-                    print(print_message, file=sys.stderr, flush=True)
+                    error_message += f"Exception message: {exception_message}\n"
+                    error_message += f"Exception trace:\n{exception_trace_string}"
+                    logger.error(error_message, file=sys.stderr, flush=True)
 
                 # Frame not found
                 if not found and (
@@ -653,13 +654,13 @@ class VideoDecoder:
             return decoded_images
 
         except Exception as e:
-            print_message = f"An exception occurred in VideoDecoder while decoding frames in {self.file}, "
+            error_message = f"An exception occurred in VideoDecoder while decoding frames in {self.file}, "
             exception_message = str(e)
             exception_trace_string = traceback.format_exc()
-            print_message += f"Exception message: {exception_message}\n"
-            print_message += f"Exception trace:\n{exception_trace_string}\n"
-            print_message += f"Exception decoded timesteps: {all_decoded_timestamp}\n"
-            print(print_message, file=sys.stderr, flush=True)
+            error_message += f"Exception message: {exception_message}\n"
+            error_message += f"Exception trace:\n{exception_trace_string}\n"
+            error_message += f"Exception decoded timesteps: {all_decoded_timestamp}\n"
+            logger.error(error_message, file=sys.stderr, flush=True)
             raise e
 
 
@@ -671,14 +672,12 @@ def main():
     start = time.time()
     images = decoder.decode_frames_at_times(timstamps)
     end = time.time()
-    print(
-        f"Decoding {len(timstamps)} frames took {end - start} seconds, fps: {len(timstamps) / (end - start):.3f}",
-    )
+    logger.info(f"Decoding {len(timstamps)} frames took {end - start} seconds, fps: {len(timstamps) / (end - start):.3f}",)
 
     for image in images:
         image.show()
 
-    print("Done")
+    logger.info("Done")
 
 
 if __name__ == "__main__":

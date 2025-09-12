@@ -127,6 +127,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] We can download video chunks from S3 give the random offset/num frames we need.
 - [ ] How can we reweight the index during training? A straightforward way would be randomly filtering out samples in the index via SQL queries. But maybe, we can have a reweighting_fn as an input or a weight column in the index?
 - [ ] Support spawn start method for dataloader workers.
+- [ ] An option to cache the downloaded/loaded sample dict? Ideally, through some cache transform, i.e. so we can cache at any selected point in the transform chain. Then, we can store videos unpacked as np4/torch files and load them much faster.
 
 ### TODOs for v1.5:
 - [ ] The logic for resetting the downloader after each epoch is hacky. I dont think we should do that.

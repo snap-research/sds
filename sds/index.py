@@ -324,7 +324,7 @@ def load_index_files(index_files_list: list[str], dst_dir: str, already_loaded: 
     """
     # 1. Download files (this part is already concise)
     dst_files_list = [os.path.join(dst_dir, RAW_INDEX_FILES_DIR, os_utils.path_key(f)) for f in index_files_list]
-    os_utils.parallel_download(index_files_list, dst_files_list, num_workers=max_workers, verbose=True, **download_kwargs)
+    os_utils.parallel_download(index_files_list, dst_files_list, num_workers=max_workers, verbose=len(index_files_list) > 1, **download_kwargs)
 
     # 2. Determine which files actually need to be loaded
     files_to_load = [f for f in dst_files_list if f not in already_loaded]
