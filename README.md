@@ -46,12 +46,12 @@ recompute: true
 val_ratio: 0.1 # The fraction of the dataset to use for validation dataset.
 max_num_val_rows: 10000 # The maximum number of rows in the validation dataset.
 local_tmp_dir: ~ # Local temporary directory where the merged parquet will be saved to if provided (needed for large 20M+ rows outputs). You can likely use `/lssd/index-exports-tmp`.
-gcs_intermediate_folder: ~ # Where to save intermediate results (needed for huge 70M+ rows outputs). You can likely use `gs://dlahiri/index-exports-tmp`
+gcs_tmp_dir: ~ # Where to save intermediate results (needed for huge 70M+ rows outputs). You can likely use `gs://dlahiri/index-exports-tmp`
 ```
 Note: make sure that `s3_destination_path` is in the correct AWS region for your future training job.
 Otherwise, there might be problems when fetching parquet chunks from S3.
 
-Also, it's important to specify `local_tmp_dir`/`gcs_intermediate_folder` to push the intermediate results through for large files (20M+ rows or 100GB+).
+Also, it's important to specify `local_tmp_dir`/`gcs_tmp_dir` to push the intermediate results through for large files (20M+ rows or 100GB+).
 Otherwise, the job might fail either becase S3 multi-part upload would attempt to use too many parts (over 10K limit) or BQ auth token would expire.
 
 Then, install the script env and run the BQ export script:
