@@ -1,3 +1,7 @@
+"""
+Unfortunately, this nice small script only works for small outputs (~<10M rows)...
+For large files, use construct_index_from_bq.py, which is much more cumbersome :(
+"""
 import os, math, time, argparse, hashlib
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone

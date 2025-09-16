@@ -32,22 +32,27 @@ sql_query: "
   SELECT *
   FROM `research-prototypes.generative_ai_data_platform_test.personalization_getty_dataset`
   WHERE aes_score > 4
-    AND caption IS NOT NULL
-    AND getty_caption IS NOT NULL
-    AND getty_title IS NOT NULL
-    AND Body2DPoseHandsFace IS NOT NULL
-    AND InstanceSegmentation IS NOT NULL
-    AND FashionSegmentationImaterialist IS NOT NULL
+  AND caption IS NOT NULL
+  AND getty_caption IS NOT NULL
+  AND getty_title IS NOT NULL
+  AND Body2DPoseHandsFace IS NOT NULL
+  AND InstanceSegmentation IS NOT NULL
+  AND FashionSegmentationImaterialist IS NOT NULL
   ORDER BY RAND()
   "
 s3_destination_path: s3://snap-genvid/datasets/sds-index-files/composeme-v2.parquet
 s3_bucket_region: us-west-2 # The region of the S3 bucket. Can be left empty, but would lead to an error in case of a mismatch between $AWS_REGION in the env and the actual region of the bucket.
-recompute: true # Whether to recompute the index even if it already exists in S3.
+recompute: true
 val_ratio: 0.1 # The fraction of the dataset to use for validation dataset.
 max_num_val_rows: 10000 # The maximum number of rows in the validation dataset.
+local_tmp_dir: ~ # Local temporary directory where the merged parquet will be saved to if provided (needed for large 20M+ rows outputs). You can likely use `/lssd/index-exports-tmp`.
+gcs_intermediate_folder: ~ # Where to save intermediate results (needed for huge 70M+ rows outputs). You can likely use `gs://dlahiri/index-exports-tmp`
 ```
 Note: make sure that `s3_destination_path` is in the correct AWS region for your future training job.
 Otherwise, there might be problems when fetching parquet chunks from S3.
+
+Also, it's important to specify `local_tmp_dir`/`gcs_intermediate_folder` to push the intermediate results through for large files (20M+ rows or 100GB+).
+Otherwise, the job might fail either becase S3 multi-part upload would attempt to use too many parts (over 10K limit) or BQ auth token would expire.
 
 Then, install the script env and run the BQ export script:
 ```bash
@@ -128,6 +133,9 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] How can we reweight the index during training? A straightforward way would be randomly filtering out samples in the index via SQL queries. But maybe, we can have a reweighting_fn as an input or a weight column in the index?
 - [ ] Support spawn start method for dataloader workers.
 - [ ] An option to cache the downloaded/loaded sample dict? Ideally, through some cache transform, i.e. so we can cache at any selected point in the transform chain. Then, we can store videos unpacked as np4/torch files and load them much faster.
+- [ ] Fix random seeds in transforms. Possibly, by adding a `__random_seed__` field? Or would fixing a global random seed be enough?
+- [ ] `sds.utils.data_utils.read_parquet_slice` is not working for a wildcard of parquets.
+- [ ] Is it possible to make `construct_index_from_bq_small.py` work for large tables? It's logic is much cleaner...
 
 ### TODOs for v1.5:
 - [ ] The logic for resetting the downloader after each epoch is hacky. I dont think we should do that.
