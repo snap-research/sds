@@ -380,6 +380,29 @@ class LoadJsonMetadataTransform(BaseTransform):
         return sample
 
 @beartype
+class MergeDictFieldTransform:
+    """Takes a dictionary field and merges its contents right into the sample root."""
+    def __init__(self, input_field: str, skip_if_exists: bool=False, overwrite: bool=False, cleanup: bool=False):
+        self.input_field = input_field
+        self.skip_if_exists = skip_if_exists
+        self.overwrite = overwrite
+        self.cleanup = cleanup
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present={self.input_field: dict}, absent=[])
+
+        for k, v in sample[self.input_field].items():
+            if k in sample:
+                if self.skip_if_exists:
+                    continue
+                else:
+                    assert self.overwrite, f"Field '{k}' already exists in sample with keys {list(sample.keys())}, while skip_if_exists is False and overwrite is False."
+            sample[k] = v
+        if self.cleanup:
+            del sample[self.input_field]
+        return sample
+
+@beartype
 class ExtractMetadataSubfieldTransform:
     """Extracts a specific field from the metadata."""
     def __init__(self, metadata_subfield: str, output_field: str, metadata_field: str = 'meta'):
