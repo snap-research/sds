@@ -158,6 +158,7 @@ class MultiStreamDataLoader:
             schedule: str = 'fixed_random_order',
             counts_precision: int = 6,
             reweight_workers: bool = True,
+            persistent_workers=True, # We rely on the workers persistency to increment the epoch...
             **common_dataloader_kwargs,
         ):
         assert num_workers == 0 or num_workers >= len(stream_opts), f"num_workers ({num_workers}) must be 0 or at least the number of stream_opts ({len(stream_opts)})."
@@ -184,7 +185,7 @@ class MultiStreamDataLoader:
             assert isinstance(opts, StreamOptions), f"Expected stream_config to be of type StreamOptions, but got {type(opts)}."
             assert 'batch_size' not in opts.dataloader_kwargs or opts.dataloader_kwargs['batch_size'] == opts.batch_gpu, \
                 f"Batch size in dataloader_kwargs ({opts.dataloader_kwargs.get('batch_size')}) must match the stream's per-gpu batch size ({opts.batch_gpu})."
-            kwargs = {**common_dataloader_kwargs, **opts.dataloader_kwargs, **{'batch_size': opts.batch_gpu, 'num_workers': worker_counts[stream_id]}}
+            kwargs = {**{'persistent_workers': persistent_workers}, **common_dataloader_kwargs, **opts.dataloader_kwargs, **{'batch_size': opts.batch_gpu, 'num_workers': worker_counts[stream_id]}}
             dataloader = torch.utils.data.DataLoader(dataset=datasets[stream_id], **kwargs)
             iterator = inf_loop_dataloader(dataloader)
             self.streams.append(Stream(dataset=datasets[stream_id], iterator=iterator, dataloader=dataloader, opts=opts))
