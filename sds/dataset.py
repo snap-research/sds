@@ -125,7 +125,6 @@ class StreamingDataset(IterableDataset):
 
         self.build_index() # Build the index metadata.
         self._index_partition = None # Index will be initialized in __iter__(), when we know the workers.
-
         self.downloader = self.init_downloader() # Initialize the downloader to download the shards in parallel.
 
     def init_downloader(self) -> ParallelDownloader:
@@ -371,6 +370,7 @@ class StreamingDataset(IterableDataset):
         self._reset() # TODO: not sure if this resetting is correct...
 
         global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
+        assert len(self) >= global_num_workers, f"Dataset size {len(self)} is smaller than the number of dataloading workers {global_num_workers}."
         self._maybe_init_worker_cache_limit(global_worker_rank, global_num_workers)
         scheduled_samples: dict[str, dict[str, Any]] = {}
 

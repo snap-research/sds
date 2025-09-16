@@ -80,7 +80,7 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, max_index_fil
         return build_index_from_files_list(files_list, data_type=data_type, dst_dir=dst_dir, **kwargs)
 
 
-def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int, max_size: int=None, lazy: bool=False, max_index_files_to_use: int | None=None, **slicing_kwargs) -> IndexMetaData:
+def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int, max_size: int=None, lazy: bool=False, max_index_files_to_use: int | None=None, **process_df_kwargs) -> IndexMetaData:
     """
     This function builds an index from either `split_file_paths.txt` list or wildcard path (e.g., 's3://bucket/path/*.csv').
     It's an intra-node index, meaning that each node will process its own subset of data.
@@ -130,8 +130,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
 
     index_type = IndexType.INTRA_NODE
     df = pd.concat([dfs[f].iloc[slice_bounds[f][0]:slice_bounds[f][1]] for f in dfs], ignore_index=True)
-    df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type, **slicing_kwargs)
+    df = process_index_df(df, index_type, max_size=max_size, shuffle_seed=shuffle_seed, **process_df_kwargs)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     logger.debug(f"[Node {node_rank}] Saving the index to {index_dst} with {len(df):,} samples...")
     data_utils.save_polars_parquet(df, index_dst)
@@ -140,7 +139,7 @@ def build_index_from_many_index_files(src: str, dst_dir: str, shuffle_seed: int,
     return index_meta
 
 
-def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, max_size: int=None, lazy: bool=False, **slicing_kwargs) -> IndexMetaData:
+def build_index_from_index_file(src: str, dst_dir: str, max_size: int=None, lazy: bool=False, **process_df_kwargs) -> IndexMetaData:
     index_type = IndexType.INTER_NODE
 
     if lazy:
@@ -159,10 +158,9 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
     logger.debug(f"Reading the index file from {dst} into memory, filtering/slicing and saving as parquet...")
     df = next(iter(load_index_files([src], dst_dir, already_loaded={}).values()))  # Download and load the file into memory as a DataFrame.
     if isinstance(df, pa.Table): # Convert to pandas DataFrame if it's a PyArrow Table.
-        logger.debug(f"Converting the index file from PyArrow Table to pandas DataFrame...")
+        logger.debug("Converting the index file from PyArrow Table to pandas DataFrame...")
         df = df.to_pandas()
-    df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type, **slicing_kwargs)
+    df = process_index_df(df, index_type, max_size=max_size, **process_df_kwargs)
     assert isinstance(df, pd.DataFrame), f"Expected a DataFrame, got {type(df)} from {src}."
 
     # Now, we can save it as a parquet file for easier slicing.
@@ -173,7 +171,7 @@ def build_index_from_index_file(src: str, dst_dir: str, shuffle_seed: int=None, 
     return IndexMetaData(len(df), index_dst, index_type)
 
 
-def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType, shuffle_seed: int=None, max_size: int=None, **slicing_kwargs) -> IndexMetaData:
+def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: DataSampleType, **process_df_kwargs) -> IndexMetaData:
     index_type = IndexType.INTER_NODE
     main_files = [f for f in files_list if os_utils.file_ext(f).lower() in DATA_TYPE_TO_EXT[data_type]]
     assert len(main_files) > 0, f"Didnt find any {data_type} files (used extensions: {DATA_TYPE_TO_EXT[data_type]})."
@@ -195,8 +193,7 @@ def build_index_from_files_list(files_list: list[str], dst_dir: str, data_type: 
     # Convert the dict to a DataFrame
     INDEX_COL_NAME = 'index'
     df = pd.DataFrame.from_dict(data, orient='index').reset_index(names=INDEX_COL_NAME).sort_values(by=INDEX_COL_NAME)
-    df = maybe_shuffle_df(df, shuffle_seed)
-    df = maybe_slice_df(df, max_size, index_type, **slicing_kwargs)
+    df = process_index_df(df, index_type, **process_df_kwargs)
     index_dst = os.path.join(dst_dir, INDEX_FILE_NAME)
     data_utils.save_polars_parquet(df, index_dst)
     index_meta = IndexMetaData(len(df), index_dst, index_type)
@@ -259,12 +256,25 @@ def maybe_shuffle_df(df: pd.DataFrame, shuffle_seed: int | None) -> pd.DataFrame
         df = df.sample(frac=1, replace=False, random_state=shuffle_seed)
     return df
 
+@beartype
+def maybe_repeat_df(df: pd.DataFrame, index_col: str, repeat_factor: int=1):
+    if repeat_factor == 1:
+        return df
+
+    assert repeat_factor > 1, f"repeat_factor must be greater than 1, got {repeat_factor}."
+    assert index_col in df.columns, f"index_col '{index_col}' not found in DataFrame columns: {df.columns}."
+    df = pd.concat([df] * repeat_factor, ignore_index=True)
+    df[index_col] = df[index_col].astype(str) + '_' + (df.groupby(index_col).cumcount() + 1).astype(str) # Make the index column unique by appending a suffix.
+    return df
 
 @beartype
-def maybe_slice_df(df: pd.DataFrame, max_size: int | None, index_type, cols_to_keep: list[str] | None=None, sql_query: str | None=None) -> pd.DataFrame:
+def process_index_df(df: pd.DataFrame, index_type, max_size: int | None=None, cols_to_keep: list[str] | None=None, sql_query: str | None=None, shuffle_seed: int=None) -> pd.DataFrame:
     """
-    Slice the DataFrame to a maximum size if specified.
+    Process the index dataframe in various ways:
+        - repeat the index if asked to.
+        - shuffle the index.
     """
+    df = maybe_shuffle_df(df, shuffle_seed)
     df = data_utils.maybe_run_sql_query_on_dataframe(df, sql_query)
     if max_size is None:
         return df
@@ -347,11 +357,8 @@ def load_index_files(index_files_list: list[str], dst_dir: str, already_loaded: 
         # executor.map runs `load_file_tuple` on each file.
         # A dict comprehension consumes the results, filters failures, and builds the dictionary.
         results_iterator = executor.map(load_file_tuple, files_to_load)
-        newly_loaded = {
-            path: df
-            for path, df in tqdm(results_iterator, total=len(files_to_load), desc="Loading files")
-            if df is not None
-        }
+        results_iterator = tqdm(results_iterator, total=len(files_to_load), desc="Loading files") if len(files_to_load) > 1 else results_iterator
+        newly_loaded = {path: df for path, df in results_iterator if df is not None}
 
     # 5. Return the merged dictionary of old and new data
     return {**already_loaded, **newly_loaded}
