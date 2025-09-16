@@ -314,6 +314,7 @@ def load_pickle_embeddings(embeddings_path: str, num_tokens: int) -> torch.Tenso
     embeddings = embeddings_data['embeddings'] # [num_tokens, d]
     embeddings[embeddings_data['eot_location'] + 1:] = 0.0 # Making sure that we have no junk after the EOT token.
     embeddings = embeddings[:num_tokens] # [num_tokens, d]
+    embeddings = torch.from_numpy(embeddings) if isinstance(embeddings, np.ndarray) else embeddings # [num_tokens, d]
     paddings = torch.zeros((num_tokens - embeddings.shape[0], embeddings.shape[1]), dtype=embeddings.dtype, device=embeddings.device) # [num_paddings, d]
     embeddings = torch.cat([embeddings, paddings], axis=0) # [num_tokens, d]
 
