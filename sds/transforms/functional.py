@@ -12,10 +12,14 @@ from numpy.typing import NDArray
 from PIL import Image
 import torch
 import torchvision.transforms.functional as TVF
+from loguru import logger
 
 try:
     import torchaudio # Only import if available since it is an optional dependency.
 except ImportError:
+    torchaudio = None
+except Exception as e:
+    logger.error(f"torchaudio installation is broken: {e}")
     torchaudio = None
 
 from sds.structs import VIDEO_EXT
