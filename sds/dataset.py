@@ -73,6 +73,7 @@ class StreamingDataset(IterableDataset):
         lazy_index_prefetch_factor: int=3, # The number of index chunks to prefetch in the background when using lazy index loading.
         sql_query: str | None=None, # If specified, use the SQL query to filter/process the samples from the index file before downloading anything.
         min_num_pending_tasks_thresh: int | None=None, # The minimum number of pending tasks to keep in the downloader before scheduling more.
+        unaligned_worker_index: bool = False, # Shall each worker iterate over the global dataset independently? Bad design, but helpful for tiny datasets.
 
         # Some index optimization stuff.
         index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
@@ -102,6 +103,7 @@ class StreamingDataset(IterableDataset):
         self._lazy_index_prefetch_factor = lazy_index_prefetch_factor
         self._sql_query = sql_query
         self._min_num_pending_tasks_thresh: int = min_num_pending_tasks_thresh if min_num_pending_tasks_thresh is not None else MIN_NUM_PENDING_TASKS_THRESH[self.data_type]
+        self._unaligned_worker_index = unaligned_worker_index
 
         # Random access parameters.
         self._num_random_access_retries = num_random_access_retries
@@ -119,6 +121,7 @@ class StreamingDataset(IterableDataset):
         assert self.columns_to_download is not None and len(self.columns_to_download) > 0, f"Need to specify columns_to_download, but got {self.columns_to_download}."
         assert self._index_cols_to_keep is None or len(self._index_cols_to_keep) > 0, f"Must specify at least one column to keep in the index file, but got {self._index_cols_to_keep}."
         assert self._lazy_index_chunk_size is None or self._lazy_index_chunk_size >= 100, f"Lazy index chunk size must >= 100, but got {self._lazy_index_chunk_size}."
+        assert not self._unaligned_worker_index or self._node_cache_limit > 0, f"Unaligned worker index requires caching to mitigate race conditions, but got {self._node_cache_limit}."
 
         self.epoch = 0
         self.sample_in_epoch = 0 # What sample idx we are in the current epoch.
@@ -385,10 +388,12 @@ class StreamingDataset(IterableDataset):
                 num_threads=self._lazy_index_num_threads,
                 prefetch_factor=self._lazy_index_prefetch_factor,
                 sql_query=self._sql_query,
+                unaligned_worker_index=self._unaligned_worker_index,
             )
         else:
             if self._index_partition is None:
-                self._index_partition = load_index_partition(self.index_meta, global_worker_rank, global_num_workers, dist_utils.get_num_nodes())
+                partition_rank, partition_num_workers = (0, 1) if self._unaligned_worker_index else (global_worker_rank, global_num_workers)
+                self._index_partition = load_index_partition(self.index_meta, partition_rank, partition_num_workers, dist_utils.get_num_nodes())
             index_chunks_it = lean_index_iterator(
                 self._index_partition, chunk_size=SCHEDULE_BATCH_SIZE, sample_in_epoch=self.sample_in_epoch,
                 shuffle_seed=self.shuffle_seed, epoch=self.epoch, rank=global_worker_rank)
@@ -399,7 +404,7 @@ class StreamingDataset(IterableDataset):
             scheduled_samples=scheduled_samples,
         )
 
-        logger.debug(f"Yielded {self.sample_in_epoch} samples in epoch {self.epoch}.")
+        logger.debug(f"Processed {self.sample_in_epoch} samples in epoch {self.epoch}.")
         self.sample_in_epoch = 0  # Reset the sample index for the next epoch.
         self.epoch += 1 # TODO: this would be incrementing the epoch each time a new dataloader is called over the dataset, which is not good.
 
@@ -425,6 +430,7 @@ class LazyIndexIterator:
         num_threads: int = 4,
         prefetch_factor: int = 5,
         sql_query: str | None = None, # SQL query to filter/process the index before fetching chunks.
+        unaligned_worker_index: bool = False,
     ):
         self.path = path
         self.sql_query = sql_query
@@ -432,10 +438,11 @@ class LazyIndexIterator:
 
         # --- Calculate chunking for the current worker ---
         self.global_worker_rank, self.global_num_workers = dist_utils.get_global_worker_info()
-        num_samples_per_worker = total_num_samples // self.global_num_workers
+        partition_rank, partition_num_workers = (0, 1) if unaligned_worker_index else (self.global_worker_rank, self.global_num_workers)
+        num_samples_per_worker = total_num_samples // partition_num_workers
         num_chunks = (num_samples_per_worker + chunk_size - 1) // chunk_size
         self.chunk_size_refined = math.floor(num_samples_per_worker / num_chunks)
-        self.partition_start_sample_id = self.global_worker_rank * num_samples_per_worker
+        self.partition_start_sample_id = partition_rank * num_samples_per_worker
 
         # --- Determine the order of chunks to process ---
         chunk_order = misc.get_shuffled_sample_ids(num_chunks, shuffle_seed=shuffle_seed, epoch=epoch, rank=self.global_worker_rank)
