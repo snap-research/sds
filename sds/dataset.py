@@ -74,6 +74,7 @@ class StreamingDataset(IterableDataset):
         sql_query: str | None=None, # If specified, use the SQL query to filter/process the samples from the index file before downloading anything.
         min_num_pending_tasks_thresh: int | None=None, # The minimum number of pending tasks to keep in the downloader before scheduling more.
         unaligned_worker_index: bool = False, # Shall each worker iterate over the global dataset independently? Bad design, but helpful for tiny datasets.
+        infinite_iteration: bool = False, # If True, the dataset would be iterated infinitely. Useful when you for some reason have batch_size > dataset_size and drop_last=True.
 
         # Some index optimization stuff.
         index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
@@ -104,6 +105,7 @@ class StreamingDataset(IterableDataset):
         self._sql_query = sql_query
         self._min_num_pending_tasks_thresh: int = min_num_pending_tasks_thresh if min_num_pending_tasks_thresh is not None else MIN_NUM_PENDING_TASKS_THRESH[self.data_type]
         self._unaligned_worker_index = unaligned_worker_index
+        self._infinite_iteration = infinite_iteration
 
         # Random access parameters.
         self._num_random_access_retries = num_random_access_retries
@@ -369,7 +371,7 @@ class StreamingDataset(IterableDataset):
             if self.downloader.get_num_pending_tasks() < self._min_num_pending_tasks_thresh and (next_index_chunk := next(index_iterator, None)) is not None:
                 self._schedule_downloads_(next_index_chunk, **scheduling_kwargs)
 
-    def __iter__(self) -> Iterator[dict[str, Any]]:
+    def __iter_epoch__(self) -> Iterator[dict[str, Any]]:
         self._reset() # TODO: not sure if this resetting is correct...
 
         global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
@@ -407,6 +409,14 @@ class StreamingDataset(IterableDataset):
         logger.debug(f"Processed {self.sample_in_epoch} samples in epoch {self.epoch}.")
         self.sample_in_epoch = 0  # Reset the sample index for the next epoch.
         self.epoch += 1 # TODO: this would be incrementing the epoch each time a new dataloader is called over the dataset, which is not good.
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        while True:
+            yield from self.__iter_epoch__()
+            if self._infinite_iteration:
+                logger.debug(f"[{self.name}] Starting a new epoch {self.epoch} since self._infinite_iteration=True.")
+            else:
+                break
 
 #----------------------------------------------------------------------------
 # Index iteration utils.
