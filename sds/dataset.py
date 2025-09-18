@@ -375,7 +375,7 @@ class StreamingDataset(IterableDataset):
         self._reset() # TODO: not sure if this resetting is correct...
 
         global_worker_rank, global_num_workers = dist_utils.get_global_worker_info()
-        assert len(self) >= global_num_workers, f"Dataset size {len(self)} is smaller than the number of dataloading workers {global_num_workers}."
+        assert len(self) >= global_num_workers or self._unaligned_worker_index, f"Dataset size {len(self)} is smaller than the number of dataloading workers {global_num_workers} while unaligned_worker_index=False."
         self._maybe_init_worker_cache_limit(global_worker_rank, global_num_workers)
         scheduled_samples: dict[str, dict[str, Any]] = {}
 
