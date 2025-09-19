@@ -16,7 +16,8 @@ The package is available on the corporate PyPI:
 pip install streaming-dataset
 ```
 
-There is also a docker image for SnapVideo-V3 with streaming-dataset pre-installed: `440036398022.dkr.ecr.us-west-2.amazonaws.com/facecraft-ml:genai-video-aws-fa3-h100-torch271-126-sds`.
+There is also a docker image for SnapVideo-V3 with streaming-dataset pre-installed:
+- `streaming-dataset==0.4.3`: `440036398022.dkr.ecr.us-west-2.amazonaws.com/facecraft-ml:genai-video-aws-fa3-h100-torch271-126-sds-0-4-3`
 
 ## Quickstart
 Here is an example of how to use the streaming dataset for 2 streams.
@@ -128,16 +129,15 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 - [ ] For non-lazy parquet index without slicing and filtering, we don't need to reload-resave it.
 - [ ] Fix the current unit tests.
-- [ ] First select a caption embedding, then download the selected one for traffic optimization. Could it be done via "pre-download transforms".
-- [ ] We can download video chunks from S3 give the random offset/num frames we need.
+- [ ] `pre_download_transforms` to first select a caption embedding, then downloading the selected one for traffic optimization.
 - [ ] How can we reweight the index during training? A straightforward way would be randomly filtering out samples in the index via SQL queries. But maybe, we can have a reweighting_fn as an input or a weight column in the index?
 - [ ] Support spawn start method for dataloader workers.
 - [ ] An option to cache the downloaded/loaded sample dict? Ideally, through some cache transform, i.e. so we can cache at any selected point in the transform chain. Then, we can store videos unpacked as np4/torch files and load them much faster.
-- [ ] Fix random seeds in transforms. Possibly, by adding a `__random_seed__` field? Or would fixing a global random seed be enough?
 - [ ] `sds.utils.data_utils.read_parquet_slice` is not working for a wildcard of parquets.
-- [ ] Is it possible to make `construct_index_from_bq_small.py` work for large tables? It's logic is much cleaner...
 
 ### TODOs for v1.5:
+- [ ] Is it possible to make `construct_index_from_bq_small.py` work for large tables? It's logic is much cleaner...
+- [ ] Fix random seeds in transforms. Possibly, by adding a `__random_seed__` field? Or would fixing a global random seed be enough?
 - [ ] The logic for resetting the downloader after each epoch is hacky. I dont think we should do that.
 - [ ] More test coverage: state dict, resumal, index construction, deadlocks, sync-ed dataloader, etc.
 - [ ] Shutdown for num_workers > 0 is quite slow. Not sure why.
@@ -154,6 +154,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Plot the job cost in terms of downloading, given the number of requests, and bytes downloaded.
 
 ### TODOs for v2
+- [ ] We can download video chunks from S3 given the random offset/num frames we need.
 - [ ] Fix TODOs in the codebase (i.e. grep for "TODO" and fix).
 - [ ] SQLite index instead of parquet.
 - [ ] Move synchronous batch-wise yielding to the `StreamingDataset` class using the round-robin assumption of torch dataloader iterating over workers.
