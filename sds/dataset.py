@@ -494,7 +494,8 @@ class LazyIndexIterator:
                     return task_result['task_output']
                 else:
                     # Propagate the error from the worker thread to the main thread
-                    raise RuntimeError(f"Failed to prefetch index chunk: {task_result['error']}")
+                    logger.error(f"Failed to prefetch index chunk: {task_result['error']}")
+                    continue
         except StopIteration:
             # All tasks are done, ensure the pool is shut down before we stop
             self.shutdown()
