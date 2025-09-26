@@ -132,6 +132,7 @@ def build_parquet_from_chunks(
     filesystem: pa.fs.FileSystem,
     total_rows: int,
     num_val_rows: int = 0,
+    row_group_size: int = 20_000,
 ) -> None:
     val_ratio = (num_val_rows / total_rows) if total_rows else 0.0
     assert val_ratio <= 0.5, f"num_val_rows ({num_val_rows}) must be < half of total rows ({total_rows})."
@@ -158,7 +159,7 @@ def build_parquet_from_chunks(
                 val_writer.close()
                 val_writer = None
 
-        writer.write_table(table_chunk)
+        writer.write_table(table_chunk, row_group_size=row_group_size)
         pbar.update(len(chunk_df))
 
     if writer:
@@ -193,6 +194,7 @@ def construct_index_from_bq_query(
     bq_location: str = "US",
     local_tmp_dir: Optional[str] = None,            # write locally then upload
     gcs_tmp_dir: Optional[str] = None,   # if provided (gs://...), use GCS export path
+    row_group_size: int = 20_000,
 ):
     assert s3_destination_path.startswith('s3://') and s3_destination_path.endswith(".parquet"), \
         f"Invalid S3 path: {s3_destination_path}"
@@ -264,6 +266,7 @@ def construct_index_from_bq_query(
                 filesystem=pa.fs.LocalFileSystem(),
                 total_rows=total_rows,
                 num_val_rows=num_val_rows,
+                row_group_size=row_group_size,
             )
 
             _safe_put_to_s3(merged_local_main, s3_destination_path, cleanup=True)
@@ -282,6 +285,7 @@ def construct_index_from_bq_query(
                 filesystem=pa_filesystem,
                 total_rows=total_rows,
                 num_val_rows=num_val_rows,
+                row_group_size=row_group_size,
             )
 
             if local_tmp_dir:
@@ -320,6 +324,7 @@ def main():
         bq_location=cfg.get('bq_location', 'US'),
         local_tmp_dir=cfg.get('local_tmp_dir', None),
         gcs_tmp_dir=cfg.get('gcs_tmp_dir'),
+        row_group_size=cfg.get('row_group_size', 20_000),
     )
 
 #---------------------------------------------------------------------------
