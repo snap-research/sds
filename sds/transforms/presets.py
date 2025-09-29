@@ -616,23 +616,31 @@ class IdentityTransform:
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
 
 @beartype
-def create_standard_image_pipeline(image_field: str, resolution: tuple[int, int], return_image_as_single_frame_video: bool = False, normalize: bool=False, resize_kwargs: dict={}) -> Sequence[SampleTransform]:
+def create_standard_image_pipeline(
+    image_field: str,
+    resolution: tuple[int, int],
+    return_image_as_single_frame_video: bool = False,
+    normalize: bool=False,
+    resize_kwargs: dict={},
+    output_field: str='image', # In which field should we store the result.
+    video_output_field: str='video', # If `return_image_as_single_frame_video` is enabled, the result will be stored in this field.
+) -> Sequence[SampleTransform]:
     """Creates a standard image dataloading transform by composing transform classes."""
     transforms: Sequence[SampleTransform] = [
         LoadFromDiskTransform([image_field]),
-        RenameFieldsTransform(old_to_new_mapping={image_field: 'image'}),
-        DecodeImageTransform(input_field='image', output_field='image'),
-        ResizeImageTransform(input_field='image', resolution=resolution, **resize_kwargs),
-        ConvertImageToByteTensorTransform(input_field='image', output_field='image'),
+        RenameFieldsTransform(old_to_new_mapping={image_field: output_field}),
+        DecodeImageTransform(input_field=output_field, output_field=output_field),
+        ResizeImageTransform(input_field=output_field, resolution=resolution, **resize_kwargs),
+        ConvertImageToByteTensorTransform(input_field=output_field, output_field=output_field),
     ]
 
     if normalize:
-        transforms.append(NormalizeFramesTransform(input_field='image'))
+        transforms.append(NormalizeFramesTransform(input_field=output_field))
 
     if return_image_as_single_frame_video:
         transforms.extend([
-            ReshapeImageAsVideoTransform(input_field='image', output_field='video'),
-            FieldsFilteringTransform(fields_to_remove=['image']),
+            ReshapeImageAsVideoTransform(input_field=output_field, output_field=video_output_field),
+            FieldsFilteringTransform(fields_to_remove=[output_field]),
             AugmentNewFieldsTransform(new_fields=dict(framerate=960.0)),
         ])
 
@@ -755,22 +763,6 @@ def create_standard_joint_video_audio_pipeline(
         transforms.append(NormalizeAudioTransform(input_field='audio'))
 
     return transforms
-
-@beartype
-def create_standard_text_image_pipeline():
-    raise NotImplementedError
-
-@beartype
-def create_standard_text_video_pipeline():
-    raise NotImplementedError
-
-@beartype
-def create_standard_image_latents_pipeline():
-    raise NotImplementedError
-
-@beartype
-def create_standard_video_latents_pipeline():
-    raise NotImplementedError
 
 #----------------------------------------------------------------------------
 # Misc utils.

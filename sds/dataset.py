@@ -55,7 +55,7 @@ class StreamingDataset(IterableDataset):
         shuffle_seed: int | None=None, # Shuffle seed for the dataset.
         transforms: list[Callable]=None, # A list of data augmentation callbacks to apply to the samples.
         columns_to_download: list[str] | None=None, # The names of the columns to use from the index file.
-        index_col_name: str='index',
+        index_col_name: str='index', # The name of the column to use as the index column. For folder dataset, must be `index`.
         num_downloading_workers: int=4, # The number of workers to use for downloading the samples in parallel.
         prefetch: int=10, # The number of samples to prefetch in the downloader.
         num_downloading_retries: int=3, # The number of retries to download a sample if it fails.
@@ -80,7 +80,7 @@ class StreamingDataset(IterableDataset):
         index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
     ):
         _ = resolution # Unused, kept for compatibility with the genvid repo.
-        self.name: str = name if name is not None else os_utils.path_key(src)
+        self.name: str = name if name is not None else os_utils.path_key(src, num_parts=3, drop_ext=True)
         self.src: str = src
         self.dst: str = dst
         self.data_type: DataSampleType = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
