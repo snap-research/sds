@@ -48,6 +48,7 @@ val_ratio: 0.1 # The fraction of the dataset to use for validation dataset.
 max_num_val_rows: 10000 # The maximum number of rows in the validation dataset.
 local_tmp_dir: ~ # Local temporary directory where the merged parquet will be saved to if provided (needed for large 20M+ rows outputs). You can likely use `/lssd/index-exports-tmp`.
 gcs_tmp_dir: ~ # Where to save intermediate results (needed for huge 70M+ rows outputs). You can likely use `gs://dlahiri/index-exports-tmp`
+row_group_size: 20000 # Number of rows per parquet row group.
 ```
 Note: make sure that `s3_destination_path` is in the correct AWS region for your future training job.
 Otherwise, there might be problems when fetching parquet chunks from S3.
@@ -67,6 +68,9 @@ It will also create a validation index file with `val_ratio` fraction of the row
 ### Initializing the dataset
 
 In this example, we'll use 2 streams:
+1. The first one is an S3 video folder dataset with some videos and metadata json files.
+2. The second one is an exported image dataset of ComposeMe-V2.
+We'll construct some simple transforms and loading.
 
 
 ## How it works
@@ -123,6 +127,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Our caching logic is broken: we think we've downloaded a sample and occupied some disk space, but it was already there. This makes us delete samples thinking that we need to free up space.
 - [x] Support shuffle_seed = -1.
 - [x] Audio normalization.
+- [x] Row group size = 20k for the new script.
 - [ ] Tutorial/usage examples
 - [ ] Documentation
 - [ ] Video + .wav files loading (now we only support video files with embedded audio).
