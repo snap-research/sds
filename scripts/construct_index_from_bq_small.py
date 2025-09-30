@@ -73,11 +73,23 @@ def dataframe_iter_from_table(
 def build_parquet_from_chunks(
     dataframe_chunks_iterator: Iterator[pd.DataFrame],
     destination_path: str,
-    val_destination_path: str,
     filesystem: pa.fs.S3FileSystem,
     total_rows: int,
-    num_val_rows: int = 0,
+    val_ratio: float = 0.1,
+    max_num_val_rows: int = 10_000,
+    row_group_size: int = 20_000,
 ) -> None:
+    if val_ratio == 0:
+        num_val_rows = 0
+        val_destination_path = None
+        logger.warning("No validation set requested. This incident will be reported to Bobby.")
+    else:
+        val_destination_path = destination_path.replace(".parquet", "-val.parquet")
+        num_val_rows = min(int(total_rows * val_ratio), max_num_val_rows)
+        if num_val_rows > 100_000:
+            logger.warning(f"Writing so many ({num_val_rows}) validation rows is too much. This incident will be reported to Evan.")
+        logger.info(f"Will write {num_val_rows} validation rows to {val_destination_path}.")
+
     val_ratio = (num_val_rows / total_rows) if total_rows else 0.0
     assert val_ratio <= 0.5, f"num_val_rows ({num_val_rows}) must be < half of total rows ({total_rows})."
 
@@ -103,7 +115,7 @@ def build_parquet_from_chunks(
                 val_writer.close()
                 val_writer = None
 
-        writer.write_table(table_chunk)
+        writer.write_table(table_chunk, row_group_size=row_group_size)
         pbar.update(len(chunk_df))
 
     if writer:
@@ -118,17 +130,15 @@ def construct_index_from_bq_query(
     sql_query: str,
     s3_destination_path: str,
     recompute: bool = False,
-    val_ratio: float = 0.1,
-    max_num_val_rows: int = 10000,
     s3_bucket_region: Optional[str] = None,
     bq_dataset_for_temp: str = "scratch",
     bq_location: str = "US",
+    **writing_kwargs,
 ):
     assert s3_destination_path.startswith('s3://') and s3_destination_path.endswith(".parquet"), \
         f"Invalid S3 path: {s3_destination_path}"
 
     s3, s3_fs_pa = get_s3_filesystems(s3_bucket_region)
-    val_s3_path = s3_destination_path.replace(".parquet", "-val.parquet")
 
     if s3.exists(s3_destination_path) and not recompute:
         logger.info(f"File already exists at {s3_destination_path}. Skipping computation.")
@@ -148,23 +158,13 @@ def construct_index_from_bq_query(
             logger.warning("Query returned 0 rows. No Parquet file will be created.")
             return
 
-        num_val_rows = 0
-        if val_ratio == 0:
-            logger.warning("No validation set requested. This incident will be reported to Bobby.")
-        else:
-            num_val_rows = min(int(total_rows * val_ratio), max_num_val_rows)
-            if num_val_rows > 100_000:
-                logger.warning(f"Writing so many ({num_val_rows}) validation rows is too much. This incident will be reported to Evan.")
-            logger.info(f"Will write {num_val_rows} validation rows to {val_s3_path}.")
-
         df_iter = dataframe_iter_from_table(bq_client, bqstorage_client, tmp_table)
         build_parquet_from_chunks(
             dataframe_chunks_iterator=df_iter,
             destination_path=s3_destination_path.replace("s3://", ""),
-            val_destination_path=val_s3_path.replace("s3://", ""),
             filesystem=s3_fs_pa,
             total_rows=total_rows,
-            num_val_rows=num_val_rows,
+            **writing_kwargs,
         )
 
         logger.info(f"Successfully wrote {total_rows} rows to {s3_destination_path}")

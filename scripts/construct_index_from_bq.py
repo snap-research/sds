@@ -127,43 +127,64 @@ def _download_gcs_prefix_to_local(
 
 def build_parquet_from_chunks(
     dataframe_chunks_iterator: Iterator[pd.DataFrame],
-    destination_path: str,
-    val_destination_path: str,
-    filesystem: pa.fs.FileSystem,
     total_rows: int,
-    num_val_rows: int = 0,
     row_group_size: int = 20_000,
+    **writing_kwargs,
 ) -> None:
-    val_ratio = (num_val_rows / total_rows) if total_rows else 0.0
-    assert val_ratio <= 0.5, f"num_val_rows ({num_val_rows}) must be < half of total rows ({total_rows})."
-
     writer = val_writer = None
     from tqdm import tqdm
     pbar = tqdm(total=total_rows, unit="rows", desc="Writing Parquet")
 
+    prev_chunk_df = None
     for chunk_df in dataframe_chunks_iterator:
         if chunk_df.empty:
             continue
-        table_chunk = pa.Table.from_pandas(chunk_df)
-        if writer is None:
-            kw = dict(schema=table_chunk.schema, compression='snappy', filesystem=filesystem)
-            writer = pq.ParquetWriter(destination_path, **kw)
-            val_writer = pq.ParquetWriter(val_destination_path, **kw) if num_val_rows > 0 else None
-
-        n_val = min(num_val_rows, math.ceil(len(chunk_df) * val_ratio))
-        if val_writer is not None and n_val > 0:
-            val_writer.write_table(table_chunk.slice(0, n_val))
-            num_val_rows -= n_val
-            table_chunk = table_chunk.slice(n_val)
-            if num_val_rows <= 0:
-                val_writer.close()
-                val_writer = None
-
-        writer.write_table(table_chunk, row_group_size=row_group_size)
+        chunk_df = pd.concat([prev_chunk_df, chunk_df]) if prev_chunk_df is not None else chunk_df
+        if row_group_size is not None and len(chunk_df) < row_group_size:
+            prev_chunk_df = chunk_df
+            continue
+        writer, val_writer = _write_chunk_df(writer, val_writer, total_rows, chunk_df=chunk_df, row_group_size=row_group_size, **writing_kwargs)
         pbar.update(len(chunk_df))
+        prev_chunk_df = None
+
+    if prev_chunk_df is not None:
+        writer, val_writer = _write_chunk_df(writer, val_writer, total_rows, chunk_df=prev_chunk_df, row_group_size=row_group_size, **writing_kwargs)
 
     if writer:
         writer.close()
+
+def _write_chunk_df(
+        writer,
+        val_writer,
+        total_rows: int=None,
+        chunk_df: pd.DataFrame=None,
+        row_group_size: int | None=None,
+        destination_path: str=None,
+        val_destination_path: str=None,
+        filesystem: pa.fs.FileSystem=None,
+        num_val_rows: int = 0,
+    ):
+    val_ratio = (num_val_rows / total_rows) if total_rows else 0.0
+    assert val_ratio <= 0.5, f"num_val_rows ({num_val_rows}) must be < half of total rows ({total_rows})."
+
+    table_chunk = pa.Table.from_pandas(chunk_df)
+    if writer is None:
+        kw = dict(schema=table_chunk.schema, compression='snappy', filesystem=filesystem)
+        writer = pq.ParquetWriter(destination_path, **kw)
+        val_writer = pq.ParquetWriter(val_destination_path, **kw) if num_val_rows > 0 else None
+
+    n_val = min(num_val_rows, math.ceil(len(chunk_df) * val_ratio))
+    if val_writer is not None and n_val > 0:
+        val_writer.write_table(table_chunk.slice(0, n_val))
+        num_val_rows -= n_val
+        table_chunk = table_chunk.slice(n_val)
+        if num_val_rows <= 0:
+            val_writer.close()
+            val_writer = None
+
+    writer.write_table(table_chunk, row_group_size=row_group_size)
+
+    return writer, val_writer
 
 def _parquet_shards_dataframe_iter(shards_root_dir: str) -> Iterator[pd.DataFrame]:
     """
