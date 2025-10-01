@@ -148,7 +148,7 @@ def decode_video(
         approx_frame_seek: bool = False,
         real_duration: float | None = None, # If provided, we ignore the video metadata.
         real_framerate: float | None = None, # If provided, we ignore the video metadata.
-    ) -> tuple[Sequence[Image.Image], float, NDArray | None, int | None]:
+    ) -> tuple[Sequence[Image.Image], list[float], float, NDArray | None, int | None]:
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
     """
@@ -173,7 +173,7 @@ def decode_video(
 
     start_frame_timestamp = np.random.rand() * max(full_video_duration - clip_duration, 0.0) if random_offset else 0.0
     frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration, num_frames_to_extract,)
-    frame_timestamps = [t for t in frame_timestamps if t <= full_video_duration] # Filter out timestamps that are beyond the video duration.
+    frame_timestamps = [t.item() for t in frame_timestamps if t <= full_video_duration] # Filter out timestamps that are beyond the video duration.
     decoding_fn = video_decoder.decode_frames_at_times_approx if approx_frame_seek else video_decoder.decode_frames_at_times
     frames = decoding_fn(frame_timestamps, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)
 
@@ -185,7 +185,7 @@ def decode_video(
     if should_close_decoder:
         video_decoder.close()
 
-    return frames, clip_duration, waveform, sampling_rate
+    return frames, frame_timestamps, clip_duration, waveform, sampling_rate
 
 #----------------------------------------------------------------------------
 # Audio processing functions.
