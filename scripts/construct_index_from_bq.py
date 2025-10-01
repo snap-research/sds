@@ -167,7 +167,7 @@ def _write_chunk_df(
     val_ratio = (num_val_rows / total_rows) if total_rows else 0.0
     assert val_ratio <= 0.5, f"num_val_rows ({num_val_rows}) must be < half of total rows ({total_rows})."
 
-    table_chunk = pa.Table.from_pandas(chunk_df)
+    table_chunk = pa.Table.from_pandas(chunk_df, preserve_index=False)
     if writer is None:
         kw = dict(schema=table_chunk.schema, compression='snappy', filesystem=filesystem)
         writer = pq.ParquetWriter(destination_path, **kw)
