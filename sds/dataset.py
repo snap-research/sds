@@ -42,6 +42,7 @@ MIN_NUM_PENDING_TASKS_THRESH = {
     DataSampleType.VIDEO_LATENT: 500,
     DataSampleType.AUDIO_LATENT: 5_000,
     DataSampleType.TEXT_LATENT: 5_000,
+    None: 5_000,
 }
 
 #---------------------------------------------------------------------------
@@ -50,7 +51,7 @@ class StreamingDataset(IterableDataset):
     def __init__(self,
         src: str, # a CSV file path, a JSON file path, or a directory path (possibly remote)
         dst: str, # A local directory path where to store the samples
-        data_type: DataSampleType | str, # The type of the dataset, e.g. 'csv', 'json', 'parquet', or 'directory'
+        data_type: DataSampleType | str | None = None, # The type of the data sample (useful when building the index)
         name: str | None=None, # A name for the dataset, used to identify it in the logs and metrics.
         shuffle_seed: int | None=None, # Shuffle seed for the dataset.
         transforms: list[Callable]=None, # A list of data augmentation callbacks to apply to the samples.
@@ -83,7 +84,7 @@ class StreamingDataset(IterableDataset):
         self.name: str = name if name is not None else os_utils.path_key(src, num_parts=3, drop_ext=True)
         self.src: str = src
         self.dst: str = dst
-        self.data_type: DataSampleType = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
+        self.data_type: DataSampleType | None = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
         self.shuffle_seed: int | None = build_shuffle_seed(shuffle_seed)
         self.transforms = transforms or []
         self.columns_to_download = columns_to_download
@@ -283,7 +284,8 @@ class StreamingDataset(IterableDataset):
 
         # Augmenting with special keys.
         sample[SAMPLE_KEY_FIELD] = sample_meta[self.index_col_name]  # Add a key for the sample.
-        sample[DATA_TYPE_FIELD] = str(self.data_type)  # Add the data type of the sample.
+        if self.data_type is not None:
+            sample[DATA_TYPE_FIELD] = str(self.data_type)  # Add the data type of the sample.
 
         # Some transforms may return multiple samples, so we yield from them instead of returning a single sample.
         yield from apply_transforms_recursively(sample, self.transforms)
@@ -345,7 +347,7 @@ class StreamingDataset(IterableDataset):
             self._stored_sample_keys.clear()
 
     def _iter_chunks_(self, index_iterator: Iterator[pd.DataFrame], global_worker_rank: int, scheduled_samples: dict[str, dict[str, Any]]) -> Iterator[dict[str, Any]]:
-        logger.debug(f'[{self.name} | rank {dist_utils.get_rank()} | worker_rank {global_worker_rank}/{dist_utils.get_world_size()}] Starting to iterate over the dataset {self.name} with {self.data_type} data type. Epoch: {self.epoch}, sample_in_epoch: {self.sample_in_epoch}.')
+        logger.debug(f'[{self.name} | rank {dist_utils.get_rank()} | worker_rank {global_worker_rank}/{dist_utils.get_world_size()}] Starting to iterate over the dataset {self.name}. Epoch: {self.epoch}, sample_in_epoch: {self.sample_in_epoch}.')
         scheduling_kwargs = dict(scheduled_samples=scheduled_samples, shuffle_seed=self.shuffle_seed, epoch=self.epoch, global_worker_rank=global_worker_rank)
         self._schedule_downloads_(next(index_iterator), **scheduling_kwargs)
 

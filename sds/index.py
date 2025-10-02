@@ -45,7 +45,7 @@ class IndexMetaData:
 
 #---------------------------------------------------------------------------
 
-def build_index(src: str, dst_dir: str, data_type: DataSampleType, max_index_files_to_use: int | None=None, lazy: bool=False, **kwargs) -> IndexMetaData:
+def build_index(src: str, dst_dir: str, data_type: DataSampleType | None=None, max_index_files_to_use: int | None=None, lazy: bool=False, **kwargs) -> IndexMetaData:
     """
     This function builds an index (as pandas dataframe) of the dataset to load.
     Then it saves it (or its chunk) on the local disk as parquet for all the ranks to access.
@@ -73,6 +73,7 @@ def build_index(src: str, dst_dir: str, data_type: DataSampleType, max_index_fil
         assert max_index_files_to_use is None, f"max_index_files_to_use is not supported for folder datasets. Got {max_index_files_to_use}."
         return build_index_from_index_file(src, dst_dir, lazy=lazy, **kwargs)
     else:
+        assert data_type is not None, "data_type must be specified when src is a folder/directory (so that we can infer the extension)."
         files_list = os_utils.find_files_in_src(src)
         assert files_list, f"No files found in the source {src} for data type {data_type}."
         assert not lazy, f"lazy is not supported for folder datasets. Got {lazy}."

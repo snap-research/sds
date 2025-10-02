@@ -79,7 +79,7 @@ class StreamOptions:
         """
         world_size = dist_utils.get_world_size()
         if batch_size is None:
-            assert not batch_gpu is None, f"If batch_size={batch_size} is None, batch_gpu={batch_gpu} must be specified."
+            assert batch_gpu is not None, f"If batch_size={batch_size} is None, batch_gpu={batch_gpu} must be specified."
             num_accum_rounds = 1 if num_accum_rounds is None else int(num_accum_rounds)
             batch_size = int(batch_gpu * world_size * num_accum_rounds)
         else:

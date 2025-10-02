@@ -4,7 +4,7 @@ A set of presets for image/video/audio decoding and processing.
 import io
 import math
 import pickle
-from typing import Union, Any, Sequence
+from typing import Union, Any, Sequence, BinaryIO
 
 from beartype import beartype
 import numpy as np
@@ -94,8 +94,14 @@ def load_image_from_bytes(image_bytes: bytes) -> Image.Image:
     return Image.open(io.BytesIO(image_bytes)).convert('RGB') # Ensure the image is in RGB format
 
 @beartype
-def convert_pil_image_to_byte_tensor(image: Image.Image) -> torch.Tensor:
-    return torch.from_numpy(np.array(image)).permute(2, 0, 1)
+def convert_pil_image_to_byte_tensor(image: Image.Image, convert_to_rgb: bool=True, cut_alpha: bool=False) -> torch.Tensor:
+    img_pt = torch.from_numpy(np.array(image)) # [h, w, c | null]
+    img_pt = img_pt.unsqueeze(-1) if img_pt.ndim == 2 else img_pt # [h, w, 1]
+    img_pt = img_pt.repeat(1, 1, 3) if img_pt.shape[2] == 1 and convert_to_rgb else img_pt # [h, w, 3]
+    img_pt = img_pt[:, :, :3] if img_pt.shape[2] > 3 and cut_alpha else img_pt # [h, w, 3]
+    img_pt = img_pt.permute(2, 0, 1) # [3, h, w]
+
+    return img_pt # [3, h, w]
 
 @beartype
 def load_image_tensor_from_bytes(image_bytes: bytes) -> torch.Tensor:
@@ -136,7 +142,7 @@ def _apply_crop(x: Image.Image | torch.Tensor, crop: tuple[int, int, int, int]) 
 
 @beartype
 def decode_video(
-        video_file: bytes | str | None=None,
+        video_file: BinaryIO | str | None=None,
         num_frames_to_extract: int=1,
         video_decoder: VideoDecoder | None=None,
         random_offset: bool=True,
@@ -155,7 +161,7 @@ def decode_video(
     should_close_decoder = video_decoder is None
     if video_decoder is None:
         assert video_file is not None, "Video bytes must be provided if no video decoder is specified."
-        assert isinstance(video_file, bytes) or os_utils.file_ext(video_file) in VIDEO_EXT, f"Unsupported video file type: {video_file}. Supported types: {VIDEO_EXT}."
+        assert not isinstance(video_file, str) or os_utils.file_ext(video_file) in VIDEO_EXT, f"Unsupported video file type: {video_file}. Supported types: {VIDEO_EXT}."
         video_decoder = VideoDecoder(file=video_file, default_thread_type=thread_type)
         should_close_decoder = True # We should close it since it's us who opened it.
 
