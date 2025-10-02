@@ -66,38 +66,6 @@ python scripts/construct_index_from_bq_query.py composeme-v2.yaml
 It will create a single parquet index file and upload it to S3.
 It will also create a validation index file with `val_ratio` fraction of the rows (up to `max_num_val_rows`).
 
-### (Very) minimal example with local data
-We can just iterate over some local data.
-
-```python
-import os
-import torch
-from sds.dataset import StreamingDataset
-
-src = '/tmp/dummy-data'
-dst = '/tmp/dummy-out'
-
-# Generate some dummy data.
-os.makedirs(src, exist_ok=True) # Let's generate some dummy data first.
-for i in range(10):
-    with open(os.path.join(src, f'{i:05d}.txt'), 'w') as f:
-        f.write(f'This is sample {i}.\n' * 10)
-
-class LoadTransform():
-    def __call__(self, sample: dict) -> dict:
-        # We got a sample with keys: `index` (filename) and `txt` (path to the text file, inferred from the extension).
-        with open(sample['txt'], 'r') as f:
-            sample['txt'] = f.read() # Load the text content.
-        return sample
-
-
-# For folder datasets, `columns_to_download` specify the sample data to copy (from local or S3).
-dataset = StreamingDataset(src, dst, columns_to_download=['txt'], data_type='text', transforms=[LoadTransform()])
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, num_workers=0)
-for i, batch in enumerate(dataloader):
-    print(f'Batch {i}', batch)
-```
-
 ### Minimal example with an S3 parquet index
 
 There are multiple examples for different modalities in the `examples/` folder.
@@ -204,6 +172,40 @@ if __name__ == '__main__':
     main()
 ```
 
+### (Very) minimal example with folder datasets
+For this example, we are just iterating over the text files in a local folder.
+The nasty part of the folder datasets is the necessity to specify a `data_type`.
+
+```python
+import os
+import torch
+from sds.dataset import StreamingDataset
+
+src = '/tmp/dummy-data' # Could, in fact, be an S3 path as well (though harder to generate the data for)
+dst = '/tmp/dummy-out'
+EXT = 'txt'
+
+# Generate some dummy data.
+os.makedirs(src, exist_ok=True) # Let's generate some dummy data first.
+for i in range(10):
+    with open(os.path.join(src, f'{i:05d}.{EXT}'), 'w') as f:
+        f.write(f'This is sample {i}.\n' * 10)
+
+class LoadTransform():
+    def __call__(self, sample: dict) -> dict:
+        # We got a sample with keys: `index` (filename) and `txt` (path to the text file, inferred from the extension).
+        with open(sample[EXT], 'r') as f:
+            sample[EXT] = f.read() # Load the text content.
+        return sample
+
+# For folder datasets, `columns_to_download` specify the sample data to copy (from local or S3).
+dataset = StreamingDataset(src, dst, columns_to_download=[EXT], data_type='text', transforms=[LoadTransform()])
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, num_workers=0)
+for i, batch in enumerate(dataloader):
+    print(f'Batch {i}', batch)
+```
+
+
 ### Debugging tips
 
 - Set `num_workers=0` in the dataloader.
@@ -264,7 +266,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Support shuffle_seed = -1.
 - [x] Audio normalization.
 - [x] Row group size = 20k for the new script.
-- [ ] Tutorial/usage examples
+- [x] Tutorial/usage examples
 - [ ] Documentation
 - [ ] Video + .wav files loading (now we only support video files with embedded audio).
 - [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
