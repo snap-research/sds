@@ -18,6 +18,7 @@ pip install streaming-dataset
 
 There is also a docker image for SnapVideo-V3 with streaming-dataset pre-installed:
 - `streaming-dataset==0.4.3`: `440036398022.dkr.ecr.us-west-2.amazonaws.com/facecraft-ml:genai-video-aws-fa3-h100-torch271-126-sds-0-4-3`
+- `streaming-dataset==0.4.6`: `440036398022.dkr.ecr.us-west-2.amazonaws.com/facecraft-ml:genai-video-aws-fa3-h100-torch271-126-sds-0-4-6`
 
 ## Quickstart
 Here is an example of how to use the streaming dataset for 2 streams.
@@ -65,13 +66,148 @@ python scripts/construct_index_from_bq_query.py composeme-v2.yaml
 It will create a single parquet index file and upload it to S3.
 It will also create a validation index file with `val_ratio` fraction of the rows (up to `max_num_val_rows`).
 
-### Initializing the dataset
+### (Very) minimal example with local data
+We can just iterate over some local data.
 
-In this example, we'll use 2 streams:
-1. The first one is an S3 video folder dataset with some videos and metadata json files.
-2. The second one is an exported image dataset of ComposeMe-V2.
-We'll construct some simple transforms and loading.
+```python
+import os
+import torch
+from sds.dataset import StreamingDataset
 
+src = '/tmp/dummy-data'
+dst = '/tmp/dummy-out'
+
+# Generate some dummy data.
+os.makedirs(src, exist_ok=True) # Let's generate some dummy data first.
+for i in range(10):
+    with open(os.path.join(src, f'{i:05d}.txt'), 'w') as f:
+        f.write(f'This is sample {i}.\n' * 10)
+
+class LoadTransform():
+    def __call__(self, sample: dict) -> dict:
+        # We got a sample with keys: `index` (filename) and `txt` (path to the text file, inferred from the extension).
+        with open(sample['txt'], 'r') as f:
+            sample['txt'] = f.read() # Load the text content.
+        return sample
+
+
+# For folder datasets, `columns_to_download` specify the sample data to copy (from local or S3).
+dataset = StreamingDataset(src, dst, columns_to_download=['txt'], data_type='text', transforms=[LoadTransform()])
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, num_workers=0)
+for i, batch in enumerate(dataloader):
+    print(f'Batch {i}', batch)
+```
+
+### Minimal example with an S3 parquet index
+
+There are multiple examples for different modalities in the `examples/` folder.
+For brevity, we won't repeat them here, and just show some basic usage with a single stream.
+
+```python
+import os
+from typing import Callable
+os.environ['AWS_REGION'] = 'us-west-2' # Make sure that AWS_REGION is set to the region of your S3 bucket.
+os.environ['SDS_LOG_LEVEL'] = 'DEBUG' # Set the log level to DEBUG to see more logs.
+
+import torch
+from PIL import Image
+from sds.dataset import StreamingDataset
+from sds.transforms import presets
+
+def build_transforms() -> list[Callable]:
+    # SDS contains some standard transforms for common use cases. Let's use the one for images.
+    image_transforms = presets.create_standard_image_pipeline(
+        image_field='personalization_image_path', # Where the downloading field is located.
+        resolution=(256, 256),  # Resize the image to this resolution.
+    )
+
+    # Let's only keep the 'image' and 'media_id' fields in the final output, since there is a lot of unused stuff in the index file.
+    # (This unused stuff can break pytorch's default collate function.)
+    sample_cleaning_transform = presets.EnsureFieldsTransform(fields_whitelist=['image', 'media_id'], drop_others=True)
+
+    return image_transforms + [HorizontalFlipTransform(), sample_cleaning_transform]
+
+
+class HorizontalFlipTransform:
+    # A simple horizontal flip transform just for illustration purposes
+    # Transform is just a class with a __call__ method which takes a sample dict and returns a sample dict.
+    def __call__(self, sample: dict) -> dict:
+        assert 'image' in sample, f'Image field is missing in the sample: {sample.keys()}'
+        assert isinstance(sample['image'], torch.Tensor), f'Image is not a torch.Tensor, but {type(sample["image"])}'
+        assert sample['image'].ndim == 3, f'Wrong image shape: {sample["image"].shape}'
+        assert sample['image'].shape[0] in [1, 3], f'Wrong image shape: {sample["image"].shape}'
+        sample['image'] = torch.flip(sample['image'], dims=[2]) if torch.rand(1) < 0.5 else sample['image'] # [c, h, w]
+        return sample
+
+
+def main():
+    dataset = StreamingDataset(
+        src='s3://snap-genvid/datasets/sds-index-files/composeme-v2.parquet',
+        dst='/tmp/where/to/download',      # Where to download the samples.
+        transforms=build_transforms(),    # A list of transforms to apply.
+
+        # Which columns to download from the index. Their values should be URLs/paths.
+        # Once downloaded, a sample dict will be constructed, with the column names pointing to the local paths.
+        # After that, all the transforms will be applied to the sample dict.
+        columns_to_download=['personalization_image_path', 'personalization_caption_path'],
+
+        index_col_name='media_id',         # Name of the column to use as the index (should have unique values for samples).
+        num_downloading_workers=5,         # How many parallel downloading workers to use.
+        prefetch=100,                      # How many samples to pre-download ahead of time.
+        cache_limit='10gb',                # How much disk space to use for caching.
+        allow_missing_columns=False,       # Should we ignore or not ignore samples with some missing `columns_to_download`?
+
+        # Some configuration for the `lazy index`. Sometimes, the index file is huge, so it's better
+        # not to load it all at once, but rather fetch in chunks.
+        lazy_index_chunk_size=1000,         # Chunk size to fetch.
+        lazy_index_num_threads=2,           # In how many threads to fetch the index chunks.
+        lazy_index_prefetch_factor=3,       # How many chunks to prefetch ahead of time.
+        min_num_pending_tasks_thresh=200,   # How many downloading samples should there be pending, before we start scheduling for sample downloading the next index chunk.
+
+        # Shuffle seed to use. If None, no shuffling is performed.
+        # If -1, then a random seed will be created on the first rank and distributed across all the ranks.
+        shuffle_seed=123,
+
+        # Let's filter out the images without any related images.
+        # The SQL query is quite arbitrary and applied on each index chunk before scheduling downloading tasks.
+        sql_query="SELECT * FROM dataframe WHERE num_related_images > 0",
+
+        # You can limit the dataset size artifically for debugging purposes (i.e. trying to overfit).
+        # Note: to reduce the dataset size below the batch_gpu size, you need to also set unaligned_worker_index=True and infinite_iteration=True.
+        max_size=50_000,
+        # unaligned_worker_index: bool = False, # Shall each worker iterate over the global dataset independently? Bad design, but helpful for tiny datasets.
+        # infinite_iteration: bool = False, # If True, the dataset would be iterated infinitely. Useful when you for some reason have batch_size > dataset_size and drop_last=True.
+
+        # Enable these flags for debugging purposes. Otherwise, the exceptions will be silenced.
+        print_exceptions=True,
+        print_traceback=True,
+    )
+
+    # Note: we have (slow) random access!
+    sample = dataset[12345]
+    Image.fromarray(sample['image'].permute(1, 2, 0).cpu().numpy().astype('uint8')).save('/tmp/where/to/download/debug-sample-12345.png')
+
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=3, num_workers=2, pin_memory=True, drop_last=True)
+    data_iterator = iter(dataloader)
+
+    for epoch in range(1, 2):
+        for i in range(7):
+            batch = next(data_iterator)
+            print(f'Processing batch #{i + 1} with {len(batch["media_id"])} items.')
+            for i, img in enumerate(batch['image']):
+                assert img.dtype == torch.uint8, f'Image dtype is not uint8, but {img.dtype}'
+                img = img.permute(1, 2, 0).cpu().numpy().astype('uint8') # [h, w, c]
+                Image.fromarray(img).save(os.path.join('/tmp/where/to/download', batch['media_id'][i] + '.png'))
+
+
+if __name__ == '__main__':
+    main()
+```
+
+### Debugging tips
+
+- Set `num_workers=0` in the dataloader.
+- Set `print_exceptions=True` and `print_traceback=True` in the dataset to see what is going wrong.
 
 ## How it works
 The entry point is the `StreamingDataset` class, which takes a source `src` and arguments and does the following:
