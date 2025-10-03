@@ -637,8 +637,7 @@ def create_standard_image_pipeline(
     """Creates a standard image dataloading transform by composing transform classes."""
     transforms: Sequence[SampleTransform] = [
         LoadFromDiskTransform([image_field]),
-        RenameFieldsTransform(old_to_new_mapping={image_field: output_field}),
-        DecodeImageTransform(input_field=output_field, output_field=output_field),
+        DecodeImageTransform(input_field=image_field, output_field=output_field),
         ResizeImageTransform(input_field=output_field, resolution=resolution, **resize_kwargs),
         ConvertImageToByteTensorTransform(input_field=output_field, output_field=output_field),
     ]
@@ -717,20 +716,20 @@ def create_standard_video_pipeline(
     normalize: bool = False, # Whether to normalize the video frames to [-1, 1] range.
     original_resolution_fields: tuple[str, str] | None = None, # If provided, will undistort the video frames based on original height/width.
     resize_kwargs: dict = {}, # Extra resizing parameters for ResizeVideoTransform
+    output_field: str = 'video', # In which field should we store the result.
 ):
     """
     Creates a standard text/video dataloading transform, which loads and decodes a video.
     """
     transforms: Sequence[SampleTransform] = [
-        RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
-        DecodeVideoTransform(input_field='video', num_frames=num_frames, **decode_kwargs),
-        UndistortFramesTransform(input_field='video', original_resolution_fields=original_resolution_fields) if original_resolution_fields else IdentityTransform(),
-        ResizeVideoTransform(input_field='video', resolution=resolution, **resize_kwargs),
-        ConvertVideoToByteTensorTransform(input_field='video'),
+        DecodeVideoTransform(input_field=video_field, output_field=output_field, num_frames=num_frames, **decode_kwargs),
+        UndistortFramesTransform(input_field=output_field, original_resolution_fields=original_resolution_fields) if original_resolution_fields else IdentityTransform(),
+        ResizeVideoTransform(input_field=output_field, resolution=resolution, **resize_kwargs),
+        ConvertVideoToByteTensorTransform(input_field=output_field),
     ]
 
     if normalize:
-        transforms.append(NormalizeFramesTransform(input_field='video'))
+        transforms.append(NormalizeFramesTransform(input_field=output_field))
 
     return transforms
 
@@ -744,20 +743,20 @@ def create_standard_joint_video_audio_pipeline(
     normalize_audio: bool = True, # Whether to normalize the audio by waveform / waveform.abs().max() * 0.95
     target_audio_sr: int = 16000, # Audio sampling rate
     resize_kwargs: dict = {}, # Extra resizing parameters for ResizeVideoTransform
+    video_output_field: str = 'video', # In which field should we store the video result.
 ):
     transforms: Sequence[SampleTransform] = [
-        RenameFieldsTransform(old_to_new_mapping={video_field: 'video'}),
         DecodeVideoAndAudioTransform(
-            input_field='video',
-            video_output_field='video',
+            input_field=video_field,
+            video_output_field=video_output_field,
             original_clip_duration_output_field='original_clip_duration',
             audio_output_field='audio',
             original_sr_output_field='original_audio_sampling_rate',
             num_frames=num_frames,
             **decode_kwargs
         ),
-        ResizeVideoTransform(input_field='video', resolution=resolution, **resize_kwargs),
-        ConvertVideoToByteTensorTransform(input_field='video'),
+        ResizeVideoTransform(input_field=video_output_field, resolution=resolution, **resize_kwargs),
+        ConvertVideoToByteTensorTransform(input_field=video_output_field),
         ConvertAudioToFloatTensorTransform(input_field='audio'),
         ResizeAudioTransform(
             audio_input_field='audio',
