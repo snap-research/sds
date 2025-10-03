@@ -113,7 +113,7 @@ class StreamOptions:
         for i, raw_config in enumerate(raw_stream_configs):
             # Selecting the name.
             name = raw_config.get('name', f'stream_{i:03d}')
-            assert not name in unique_names, f"Stream names must be unique. Found duplicate name: {name}."
+            assert name not in unique_names, f"Stream names must be unique. Found duplicate name: {name}."
             unique_names.add(name)
 
             # Validating and deciding the batching information.
@@ -177,7 +177,7 @@ class MultiStreamDataLoader:
         self.meta_iteration_size = sum(self._mixing_group_counts.values())
         self.shuffle_seed = shuffle_seed
         self.schedule: ScheduleType = ScheduleType(schedule)
-        assert self.schedule == ScheduleType.RANDOM or self.meta_iteration_size < 100_000, f"TODO: we have a poor implementation of random_order which materializes the indices."
+        assert self.schedule == ScheduleType.RANDOM or self.meta_iteration_size < 100_000, "TODO: we have a poor implementation of random_order which materializes the indices."
 
         # Initializing the streams.
         self.streams = []

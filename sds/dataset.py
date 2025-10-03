@@ -6,7 +6,7 @@ import hashlib
 import base64
 import traceback
 import faulthandler
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 from collections import deque
 from collections.abc import Callable
 
@@ -78,7 +78,7 @@ class StreamingDataset(IterableDataset):
         infinite_iteration: bool = False, # If True, the dataset would be iterated infinitely. Useful when you for some reason have batch_size > dataset_size and drop_last=True.
 
         # Some index optimization stuff.
-        index_cols_to_keep: list[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
+        index_cols_to_keep: Sequence[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
     ):
         _ = resolution # Unused, kept for compatibility with the genvid repo.
         self.name: str = name if name is not None else os_utils.path_key(src, num_parts=3, drop_ext=True)
