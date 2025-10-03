@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
+from typing import Sequence
 
 from beartype import beartype
 import numpy as np
@@ -269,7 +270,7 @@ def maybe_repeat_df(df: pd.DataFrame, index_col: str, repeat_factor: int=1):
     return df
 
 @beartype
-def process_index_df(df: pd.DataFrame, index_type, max_size: int | None=None, cols_to_keep: list[str] | None=None, sql_query: str | None=None, shuffle_seed: int | None=None) -> pd.DataFrame:
+def process_index_df(df: pd.DataFrame, index_type, max_size: int | None=None, cols_to_keep: Sequence[str] | None=None, sql_query: str | None=None, shuffle_seed: int | None=None) -> pd.DataFrame:
     """
     Process the index dataframe in various ways:
         - repeat the index if asked to.
