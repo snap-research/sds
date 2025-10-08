@@ -61,7 +61,7 @@ Then, install the script env and run the BQ export script:
 ```bash
 pip install genml-training-tools # Install this within the first hour of job start
 pip install --upgrade google-cloud google-cloud-bigquery google-cloud-storage db-dtypes pandas pyarrow s3fs loguru pydantic PyYAML boto3 google-cloud-bigquery-storage pyarrow
-python scripts/construct_index_from_bq_query.py composeme-v2.yaml
+python scripts/construct_index_from_bq.py composeme-v2.yaml
 ```
 It will create a single parquet index file and upload it to S3.
 It will also create a validation index file with `val_ratio` fraction of the rows (up to `max_num_val_rows`).
