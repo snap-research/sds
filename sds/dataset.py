@@ -52,33 +52,34 @@ class StreamingDataset(IterableDataset):
         src: str, # a CSV file path, a JSON file path, or a directory path (possibly remote)
         dst: str, # A local directory path where to store the samples
         data_type: DataSampleType | str | None = None, # The type of the data sample (useful when building the index)
-        name: str | None=None, # A name for the dataset, used to identify it in the logs and metrics.
-        shuffle_seed: int | None=None, # Shuffle seed for the dataset.
+        name: str | None = None, # A name for the dataset, used to identify it in the logs and metrics.
+        shuffle_seed: int | None = None, # Shuffle seed for the dataset.
         transforms: list[Callable]=None, # A list of data augmentation callbacks to apply to the samples.
-        columns_to_download: list[str] | None=None, # The names of the columns to use from the index file.
+        predownload_transforms: list[Callable] = None, # A list of data augmentation callbacks to apply to the samples before they are scheduled for downloading (i.e. raw dicts from the index).
+        columns_to_download: list[str] | None = None, # The names of the columns to use from the index file.
         index_col_name: str='index', # The name of the column to use as the index column. For folder dataset, must be `index`.
         num_downloading_workers: int=4, # The number of workers to use for downloading the samples in parallel.
         prefetch: int=10, # The number of samples to prefetch in the downloader.
         num_downloading_retries: int=3, # The number of retries to download a sample if it fails.
         none_to_empty_str: bool=True, # If True, convert None column values to empty strings in the samples.
         cache_limit: int | str | None='100mb', # The limit of the cache size in bytes. If None, no limit is applied.
-        max_size: int | None=None, # Cuts the amount of samples to this size, if specified. Useful for debugging or testing.
+        max_size: int | None = None, # Cuts the amount of samples to this size, if specified. Useful for debugging or testing.
         resolution: Any=None, # TODO: dirty hack to support the genvid repo...
         allow_missing_columns: bool=False, # If True, ignore missing columns in the index file.
         num_random_access_retries: int=5, # The number of retries to access a sample by its index.
         print_exceptions: bool=False, # If True, print exceptions in the main thread.
         print_traceback: bool=False, # If True, print the traceback of exceptions in the main thread.
-        max_index_files_to_use: int | None=None, # If specified, use only the first N index files for the dataset. Useful for debugging or testing.
-        lazy_index_chunk_size: int | None=None, # If positive, would only be reading `index_chunk_size` rows from the index file at a time. Also, won't load the whole index into memory.
+        max_index_files_to_use: int | None = None, # If specified, use only the first N index files for the dataset. Useful for debugging or testing.
+        lazy_index_chunk_size: int | None = None, # If positive, would only be reading `index_chunk_size` rows from the index file at a time. Also, won't load the whole index into memory.
         lazy_index_num_threads: int=3, # The number of threads to use for prefetching index chunks when using lazy index loading.
         lazy_index_prefetch_factor: int=3, # The number of index chunks to prefetch in the background when using lazy index loading.
-        sql_query: str | None=None, # If specified, use the SQL query to filter/process the samples from the index file before downloading anything.
-        min_num_pending_tasks_thresh: int | None=None, # The minimum number of pending tasks to keep in the downloader before scheduling more.
+        sql_query: str | None = None, # If specified, use the SQL query to filter/process the samples from the index file before downloading anything.
+        min_num_pending_tasks_thresh: int | None = None, # The minimum number of pending tasks to keep in the downloader before scheduling more.
         unaligned_worker_index: bool = False, # Shall each worker iterate over the global dataset independently? Bad design, but helpful for tiny datasets.
         infinite_iteration: bool = False, # If True, the dataset would be iterated infinitely. Useful when you for some reason have batch_size > dataset_size and drop_last=True.
 
         # Some index optimization stuff.
-        index_cols_to_keep: Sequence[str] | None=None, # Columns to keep in the index file. If None, all columns are kept.
+        index_cols_to_keep: Sequence[str] | None = None, # Columns to keep in the index file. If None, all columns are kept.
     ):
         _ = resolution # Unused, kept for compatibility with the genvid repo.
         self.name: str = name if name is not None else os_utils.path_key(src, num_parts=3, drop_ext=True)
@@ -87,6 +88,7 @@ class StreamingDataset(IterableDataset):
         self.data_type: DataSampleType | None = DataSampleType.from_str(data_type) if isinstance(data_type, str) else data_type
         self.shuffle_seed: int | None = build_shuffle_seed(shuffle_seed)
         self.transforms = transforms or []
+        self.predownload_transforms = predownload_transforms or []
         self.columns_to_download = columns_to_download
         self.num_downloading_workers = num_downloading_workers
         self.prefetch = prefetch
@@ -194,7 +196,7 @@ class StreamingDataset(IterableDataset):
         return self.index_meta.num_samples
 
     @beartype
-    def set_progress(self, epoch: int, sample_in_epoch: int | None=None) -> None:
+    def set_progress(self, epoch: int, sample_in_epoch: int | None = None) -> None:
         self.epoch = epoch
         self.sample_in_epoch = sample_in_epoch if sample_in_epoch is not None else 0
 
@@ -239,6 +241,7 @@ class StreamingDataset(IterableDataset):
         return sample
 
     def _schedule_download_(self, key: int | str, sample_meta: dict[str, Any], blocking: bool=False) -> Any:
+        sample_meta = next(apply_transforms_recursively(sample_meta, self.predownload_transforms))
         columns_to_download = [col for col in self.columns_to_download if col in sample_meta and sample_meta[col] is not None and sample_meta[col] != '']
         assert self._allow_missing_columns or len(columns_to_download) == len(self.columns_to_download), \
             f"[{self.name}] Some columns are missing in the sample meta: {sample_meta}. Expected columns: {self.columns_to_download}, available columns: {columns_to_download}."
@@ -257,7 +260,7 @@ class StreamingDataset(IterableDataset):
             sample_meta[col] = dst
         sample_meta[PROCESSED_FIELD] = True  # Mark the sample as processed.
 
-        return downloading_result # Return smth meaningful only for blocking calls.
+        return downloading_result # Returns smth meaningful only for blocking calls.
 
     def _schedule_downloads_(self, index_chunk: pd.DataFrame, scheduled_samples: dict[str, dict], shuffle_seed: int, epoch: int, global_worker_rank: int) -> int:
         schedule_order = misc.get_shuffled_sample_ids(len(index_chunk), shuffle_seed=shuffle_seed, epoch=epoch, rank=global_worker_rank)

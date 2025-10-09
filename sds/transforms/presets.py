@@ -542,14 +542,15 @@ class RenameFieldsTransform:
 @beartype
 class LoadFromDiskTransform:
     """Loads specified binary files from disk into memory."""
-    def __init__(self, fields_to_load: Sequence[str]):
+    def __init__(self, fields_to_load: Sequence[str], mode: str='rb'):
         assert len(fields_to_load) > 0, "At least one field must be specified to load from disk."
         self.fields_to_load = fields_to_load
+        self.mode = mode
 
     def __call__(self, sample: SampleData) -> SampleData:
         for field in self.fields_to_load:
             assert field in sample, f"Column {field} not found in sample with keys {list(sample.keys())}."
-            with open(sample[field], 'rb') as f:
+            with open(sample[field], self.mode) as f:
                 sample[field] = f.read()
         return sample
 
