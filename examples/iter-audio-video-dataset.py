@@ -79,6 +79,7 @@ def main():
             batch = next(data_iterator)
             print(f'Processing batch #{iteration + 1} with {len(batch["data_id"])} items.')
             print('batch __sample_key__', batch.get('__sample_key__', None))
+            print('Frame timestamps:', batch['frame_timestamps'])
 
     print('Done')
 

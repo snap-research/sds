@@ -178,7 +178,7 @@ def decode_video(
         num_frames_to_extract = max(1, round(clip_duration * target_framerate))
 
     start_frame_timestamp = np.random.rand() * max(full_video_duration - clip_duration, 0.0) if random_offset else 0.0
-    frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration, num_frames_to_extract)
+    frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + max(clip_duration - video_decoder.frame_duration, 0), num_frames_to_extract)
     frame_timestamps = [t.item() for t in frame_timestamps if t <= full_video_duration] # Filter out timestamps that are beyond the video duration.
     decoding_fn = video_decoder.decode_frames_at_times_approx if approx_frame_seek else video_decoder.decode_frames_at_times
     frames = decoding_fn(frame_timestamps, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)

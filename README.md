@@ -269,8 +269,8 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [x] Audio normalization.
 - [x] Row group size = 20k for the new script.
 - [x] Tutorial/usage examples
+- [x] Video + .wav files loading (now we only support video files with embedded audio).
 - [ ] Documentation
-- [ ] Video + .wav files loading (now we only support video files with embedded audio).
 - [ ] Tensor parallel support: iterating the streams from one dataloader for one meta-iter and broadcasting them within the group.
 - [ ] For non-lazy parquet index without slicing and filtering, we don't need to reload-resave it.
 - [ ] Fix the current unit tests.
