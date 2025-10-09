@@ -192,18 +192,18 @@ class AverageAudioTransform(BaseTransform):
 @beartype
 class ResizeAudioTransform(BaseTransform):
     """Resizes the audio by resampling it and then trimming or padding it to a specified duration."""
-    def __init__(self, audio_input_field: str, original_sr_input_field: str, clip_duration_input_field: str, target_audio_sr: int, output_field: str | None = None, **resampling_kwargs):
+    def __init__(self, audio_input_field: str, original_sr_input_field: str, target_audio_sr: int, output_field: str | None = None, **resampling_kwargs):
         self.audio_input_field = audio_input_field
         self.original_sr_input_field = original_sr_input_field
-        self.clip_duration_input_field = clip_duration_input_field
         self.output_field = output_field if output_field is not None else audio_input_field
         self.target_audio_sr = target_audio_sr
         self.resampling_kwargs = resampling_kwargs
 
     def __call__(self, sample: SampleData) -> SampleData:
-        _validate_fields(sample, present={self.audio_input_field: torch.Tensor, self.clip_duration_input_field: float, self.original_sr_input_field: int}, absent=[])
+        _validate_fields(sample, present={self.audio_input_field: torch.Tensor, self.original_sr_input_field: int}, absent=[])
+        clip_duration: float = sample[self.audio_input_field].shape[-1] / sample[self.original_sr_input_field]
         waveform = SDF.resample_waveform(waveform=sample[self.audio_input_field], orig_freq=sample[self.original_sr_input_field], new_freq=self.target_audio_sr, **self.resampling_kwargs)
-        waveform = SDF.resize_waveform(waveform, target_length=int(self.target_audio_sr * sample[self.clip_duration_input_field]))
+        waveform = SDF.resize_waveform(waveform, target_length=int(self.target_audio_sr * clip_duration))
         sample[self.output_field] = waveform
         return sample
 
@@ -215,6 +215,24 @@ class NormalizeAudioTransform(BaseTransform):
         max_val = waveform.abs().max()
         sample[self.output_field] = (waveform / max_val * 0.95) if max_val > 0 else waveform
         return sample
+
+@beartype
+class DecodeAudioTransform:
+    """A transform which loads an audio waveform from wav/flac/mp3/etc files."""
+    def __init__(self, input_field: str, output_field: str | None = None, original_sr_output_field: str | None = None, **decode_kwargs):
+        self.input_field = input_field
+        self.output_field = output_field if output_field is not None else input_field
+        self.original_sr_output_field = original_sr_output_field
+        self.decode_kwargs = decode_kwargs
+
+    def __call__(self, sample: SampleData) -> SampleData:
+        _validate_fields(sample, present=[self.input_field], absent=[])
+        waveform_data, waveform_sampling_rate = SDF.decode_audio(sample[self.input_field], **self.decode_kwargs)
+        sample[self.output_field] = waveform_data
+        if self.original_sr_output_field is not None:
+            sample[self.original_sr_output_field] = waveform_sampling_rate
+        return sample
+
 
 #----------------------------------------------------------------------------
 # VAE latents processing transforms.
@@ -269,13 +287,12 @@ class SampleVideoVAELatentTransform:
 class DecodeVideoAndAudioTransform(BaseTransform):
     """Decodes a video file and extracts both video and audio, returning both as tensors."""
     def __init__(
-            self, input_field: str, video_output_field: str, original_clip_duration_output_field: str,
+            self, input_field: str, video_output_field: str,
             audio_output_field: str, original_sr_output_field: str, num_frames: int, duration_field: str | None = None,
             framerate_field: str | None = None, frame_timestamps_output_field: str | None = None, **decode_kwargs
         ):
         self.input_field = input_field
         self.video_output_field = video_output_field
-        self.original_clip_duration_output_field = original_clip_duration_output_field
         self.audio_output_field = audio_output_field
         self.original_sr_output_field = original_sr_output_field
         self.duration_field = duration_field
@@ -288,11 +305,10 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         _validate_fields(sample, present=[self.input_field], absent=[self.audio_output_field, self.original_sr_output_field])
         real_duration = float(sample[self.duration_field]) if self.duration_field is not None else None
         real_framerate = float(sample[self.framerate_field]) if self.framerate_field is not None else None
-        video_data, frame_timestamps, clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
+        video_data, frame_timestamps, _clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
             sample[self.input_field], num_frames_to_extract=self.num_frames, real_duration=real_duration,
             real_framerate=real_framerate, **self.decode_kwargs, return_audio=True)
         sample[self.video_output_field] = video_data
-        sample[self.original_clip_duration_output_field] = clip_duration
         sample[self.audio_output_field] = waveform_data
         sample[self.original_sr_output_field] = waveform_sampling_rate
         if self.frame_timestamps_output_field is not None:
@@ -623,6 +639,7 @@ class IdentityTransform:
 
 #----------------------------------------------------------------------------
 # Some composite pipelines for standard use cases. Should cover 80% of the cases.
+# Image processing pipelines.
 
 @beartype
 def create_standard_image_pipeline(
@@ -671,41 +688,8 @@ def create_standard_image_latent_pipeline(image_latent_field: str, return_image_
 
     return transforms
 
-@beartype
-def create_standard_video_latent_pipeline(video_latent_field: str, framerate: float | None=None, random_offset: bool=True) -> Sequence[SampleTransform]:
-    """Creates a standard video dataloading transform by composing transform classes."""
-    transforms: Sequence[SampleTransform] = [
-        LoadLatentFromDiskTransform(input_field=video_latent_field, output_field='video'),
-        SampleVideoVAELatentTransform(input_field='video', framerate=framerate, random_offset=random_offset),
-    ]
-
-    return transforms
-
-@beartype
-def create_standard_metadata_pipeline(
-    metadata_field: str,
-    class_label_metadata_field: str | None = None,
-    one_hot_encode_to_size: int | None = None,
-    return_raw_metadata: bool = True,
-    class_label_target_field: str = 'class_label'
-) -> Sequence[SampleTransform]:
-    """Creates a standard metadata processing pipeline by composing transform classes."""
-    transforms: Sequence[SampleTransform] = [
-        LoadFromDiskTransform([metadata_field]),
-        LoadJsonMetadataTransform(input_field=metadata_field),
-        RenameFieldsTransform(old_to_new_mapping={metadata_field: 'meta'}),
-    ]
-    if class_label_metadata_field is not None:
-        transforms.append(ExtractMetadataSubfieldTransform(class_label_metadata_field, class_label_target_field))
-        if one_hot_encode_to_size is not None:
-            transforms.append(OneHotEncodeTransform(input_field=class_label_target_field, num_classes=one_hot_encode_to_size))
-    else:
-        assert one_hot_encode_to_size is None, f"one_hot_encode_to_size={one_hot_encode_to_size} is only applicable when class_label_metadata_field is provided."
-
-    if not return_raw_metadata:
-        transforms.append(FieldsFilteringTransform(fields_to_remove=['meta']))
-
-    return transforms
+#----------------------------------------------------------------------------
+# Video-related pipelines.
 
 @beartype
 def create_standard_video_pipeline(
@@ -734,6 +718,42 @@ def create_standard_video_pipeline(
     return transforms
 
 @beartype
+def create_standard_video_latent_pipeline(video_latent_field: str, framerate: float | None=None, random_offset: bool=True) -> Sequence[SampleTransform]:
+    """Creates a standard video dataloading transform by composing transform classes."""
+    transforms: Sequence[SampleTransform] = [
+        LoadLatentFromDiskTransform(input_field=video_latent_field, output_field='video'),
+        SampleVideoVAELatentTransform(input_field='video', framerate=framerate, random_offset=random_offset),
+    ]
+
+    return transforms
+
+#----------------------------------------------------------------------------
+# Audio-related pipelines.
+
+@beartype
+def create_standard_audio_pipeline(
+    audio_field: str,
+    duration: float, # Target audio duration in seconds.
+    mono_audio: bool = False, # Should we convert to mono by averaging channels.
+    normalize_audio: bool = True, # Whether to normalize the audio by waveform / waveform.abs().max() * 0.95
+    target_audio_sr: int = 44100, # Audio sampling rate.
+    output_field: str = 'audio',  # In which field should we store the audio result.
+    original_audio_sr_field: str = 'original_audio_sampling_rate', # In which field should we store the original audio sampling rate.
+    audio_decoding_kwargs={}, # Extra decoding parameters for DecodeAudioTransform
+    audio_resampling_kwargs={}, # Extra resampling parameters for ResizeAudioTransform
+) -> Sequence[SampleTransform]:
+    transforms: Sequence[SampleTransform] = [
+        DecodeAudioTransform(input_field=audio_field, output_field=output_field, duration=duration, original_sr_output_field=original_audio_sr_field, **audio_decoding_kwargs),
+        ResizeAudioTransform(audio_input_field=output_field, target_audio_sr=target_audio_sr, original_sr_input_field=original_audio_sr_field, **audio_resampling_kwargs),
+    ]
+    if mono_audio:
+        transforms.append(AverageAudioTransform(input_field=output_field))
+    if normalize_audio:
+        transforms.append(NormalizeAudioTransform(input_field=output_field))
+
+    return transforms
+
+@beartype
 def create_standard_joint_video_audio_pipeline(
     video_field: str,
     num_frames: int,
@@ -743,32 +763,57 @@ def create_standard_joint_video_audio_pipeline(
     normalize_audio: bool = True, # Whether to normalize the audio by waveform / waveform.abs().max() * 0.95
     target_audio_sr: int = 16000, # Audio sampling rate
     resize_kwargs: dict = {}, # Extra resizing parameters for ResizeVideoTransform
+    audio_resampling_kwargs: dict = {}, # Extra resampling parameters for ResizeAudioTransform
     video_output_field: str = 'video', # In which field should we store the video result.
+    audio_output_field: str = 'audio',  # In which field should we store the audio result.
 ):
     transforms: Sequence[SampleTransform] = [
         DecodeVideoAndAudioTransform(
             input_field=video_field,
             video_output_field=video_output_field,
-            original_clip_duration_output_field='original_clip_duration',
-            audio_output_field='audio',
+            audio_output_field=audio_output_field,
             original_sr_output_field='original_audio_sampling_rate',
             num_frames=num_frames,
             **decode_kwargs
         ),
         ResizeVideoTransform(input_field=video_output_field, resolution=resolution, **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field=video_output_field),
-        ConvertAudioToFloatTensorTransform(input_field='audio'),
-        ResizeAudioTransform(
-            audio_input_field='audio',
-            clip_duration_input_field='original_clip_duration',
-            original_sr_input_field='original_audio_sampling_rate',
-            target_audio_sr=target_audio_sr,
-        ),
+        ConvertAudioToFloatTensorTransform(input_field=audio_output_field),
+        ResizeAudioTransform(audio_input_field=audio_output_field, original_sr_input_field='original_audio_sampling_rate', target_audio_sr=target_audio_sr, **audio_resampling_kwargs),
     ]
     if mono_audio:
-        transforms.append(AverageAudioTransform(input_field='audio'))
+        transforms.append(AverageAudioTransform(input_field=audio_output_field))
     if normalize_audio:
-        transforms.append(NormalizeAudioTransform(input_field='audio'))
+        transforms.append(NormalizeAudioTransform(input_field=audio_output_field))
+
+    return transforms
+
+#----------------------------------------------------------------------------
+# Metadata processing pipelines.
+
+@beartype
+def create_standard_metadata_pipeline(
+    metadata_field: str,
+    class_label_metadata_field: str | None = None,
+    one_hot_encode_to_size: int | None = None,
+    return_raw_metadata: bool = True,
+    class_label_target_field: str = 'class_label'
+) -> Sequence[SampleTransform]:
+    """Creates a standard metadata processing pipeline by composing transform classes."""
+    transforms: Sequence[SampleTransform] = [
+        LoadFromDiskTransform([metadata_field]),
+        LoadJsonMetadataTransform(input_field=metadata_field),
+        RenameFieldsTransform(old_to_new_mapping={metadata_field: 'meta'}),
+    ]
+    if class_label_metadata_field is not None:
+        transforms.append(ExtractMetadataSubfieldTransform(class_label_metadata_field, class_label_target_field))
+        if one_hot_encode_to_size is not None:
+            transforms.append(OneHotEncodeTransform(input_field=class_label_target_field, num_classes=one_hot_encode_to_size))
+    else:
+        assert one_hot_encode_to_size is None, f"one_hot_encode_to_size={one_hot_encode_to_size} is only applicable when class_label_metadata_field is provided."
+
+    if not return_raw_metadata:
+        transforms.append(FieldsFilteringTransform(fields_to_remove=['meta']))
 
     return transforms
 

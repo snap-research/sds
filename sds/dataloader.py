@@ -97,9 +97,14 @@ class StreamOptions:
         Initializes a group of streams using their configs in a way that the ratios are correctly normalized.
         TODO: it contains some fields which are not present in the StreamOptions, but are used in the dataset...
         """
+        mixing_group_ids = [s.get('mixing_group_id') for s in raw_stream_configs]
         assert mixing_strategy in ['no_mixing', 'mix_all', 'custom'], f"Unsupported mixing strategy: {mixing_strategy}. Supported strategies are 'no_mixing', 'mix_all', and 'custom'."
-        assert mixing_strategy != 'custom' or all(s.get('mixing_group_id') is not None for s in raw_stream_configs), \
+        assert mixing_strategy != 'custom' or all(gid is not None for gid in mixing_group_ids), \
             f"If mixing_strategy is 'custom', all streams must have a 'mixing_group_id' specified. Found: {raw_stream_configs}"
+        assert mixing_strategy != 'no_mixing' or all(gid is None for gid in mixing_group_ids) or len(set(mixing_group_ids)) == len(mixing_group_ids), \
+            f"If mixing_strategy is 'no_mixing', either all streams must have mixing_group_id=None or have different mixing_group_ids. Found: {raw_stream_configs}"
+        assert mixing_strategy != 'mix_all' or all(gid is None for gid in mixing_group_ids) or len(set(mixing_group_ids)) == 1, \
+            f"If mixing_strategy is 'mix_all', either all streams must have mixing_group_id=None or have the same mixing_group_id. Found: {raw_stream_configs}"
 
         if any(s.get('ratio') is not None for s in raw_stream_configs):
             assert all(s.get('ratio') is not None for s in raw_stream_configs), f"If one stream has a ratio, all streams must have ratios: {raw_stream_configs}"

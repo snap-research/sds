@@ -211,6 +211,7 @@ for i, batch in enumerate(dataloader):
 - Set `num_workers=0` in the dataloader.
 - Set `print_exceptions=True` and `print_traceback=True` in the dataset to see what is going wrong.
 - Make sure you are on the right version: new versions can break backward compatibility.
+- If the dataloader is slow, try varying `prefetch`, `num_downloading_workers`, `num_workers` and varying lazy indexing parameters.
 
 ## How it works
 The entry point is the `StreamingDataset` class, which takes a source `src` and arguments and does the following:

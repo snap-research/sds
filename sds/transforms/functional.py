@@ -35,13 +35,13 @@ def resize_image(image: Image.Image | torch.Tensor, **resize_kwargs) -> Image.Im
 
 @beartype
 def lean_resize_frames(
-        frames: Sequence[Image.Image] | Sequence[torch.Tensor] | torch.Tensor,
-        resolution: tuple[int, int],
-        crop_before_resize: bool=True,
-        allow_vertical: bool=False,
-        random_resize: dict[str, float] | None=None,
-        interpolation_mode='bilinear',
-    ) -> Sequence[Image.Image] | Sequence[torch.Tensor]:
+    frames: Sequence[Image.Image] | Sequence[torch.Tensor] | torch.Tensor,
+    resolution: tuple[int, int],
+    crop_before_resize: bool=True,
+    allow_vertical: bool=False,
+    random_resize: dict[str, float] | None=None,
+    interpolation_mode='bilinear',
+) -> Sequence[Image.Image] | Sequence[torch.Tensor]:
     """
     Resizes each frame in the batch to the specified resolution.
     Possibly inverts it if it's vertical and allowed to do so.
@@ -142,19 +142,19 @@ def _apply_crop(x: Image.Image | torch.Tensor, crop: tuple[int, int, int, int]) 
 
 @beartype
 def decode_video(
-        video_file: BinaryIO | str | None=None,
-        num_frames_to_extract: int=1,
-        video_decoder: VideoDecoder | None=None,
-        random_offset: bool=True,
-        frame_seek_timeout_sec: float=5.0,
-        allow_shorter_videos: bool=False,
-        framerate: float | None = None,
-        thread_type: str | None = None,
-        return_audio: bool = False,
-        approx_frame_seek: bool = False,
-        real_duration: float | None = None, # If provided, we ignore the video metadata.
-        real_framerate: float | None = None, # If provided, we ignore the video metadata.
-    ) -> tuple[Sequence[Image.Image], list[float], float, NDArray | None, int | None]:
+    video_file: BinaryIO | str | None=None,
+    num_frames_to_extract: int=1,
+    video_decoder: VideoDecoder | None=None,
+    random_offset: bool=True,
+    frame_seek_timeout_sec: float=5.0,
+    allow_shorter_videos: bool=False,
+    framerate: float | None = None,
+    thread_type: str | None = None,
+    return_audio: bool = False,
+    approx_frame_seek: bool = False,
+    real_duration: float | None = None, # If provided, we ignore the video metadata.
+    real_framerate: float | None = None, # If provided, we ignore the video metadata.
+) -> tuple[Sequence[Image.Image], list[float], float, NDArray | None, int | None]:
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
     """
@@ -178,7 +178,7 @@ def decode_video(
         num_frames_to_extract = max(1, round(clip_duration * target_framerate))
 
     start_frame_timestamp = np.random.rand() * max(full_video_duration - clip_duration, 0.0) if random_offset else 0.0
-    frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration, num_frames_to_extract,)
+    frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + clip_duration, num_frames_to_extract)
     frame_timestamps = [t.item() for t in frame_timestamps if t <= full_video_duration] # Filter out timestamps that are beyond the video duration.
     decoding_fn = video_decoder.decode_frames_at_times_approx if approx_frame_seek else video_decoder.decode_frames_at_times
     frames = decoding_fn(frame_timestamps, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)
@@ -195,6 +195,41 @@ def decode_video(
 
 #----------------------------------------------------------------------------
 # Audio processing functions.
+
+@beartype
+def decode_audio(
+    audio_file_path: str,
+    duration: float | None = None,
+    clip_offset_strategy: str = 'start', # 'random' | 'max_mean' | 'max_center' | 'start'
+    allow_shorter_audio: bool = False,
+) -> tuple[torch.Tensor, int]:
+    """Decodes the audio waveform from wav/mp3/flac file or bytes."""
+    waveform, sr = torchaudio.load(audio_file_path)
+    full_duration = waveform.shape[1] / sr
+    assert duration is None or full_duration >= duration or allow_shorter_audio, f"Audio duration {full_duration} is shorter than the requested duration {duration} while allow_shorter_audio={allow_shorter_audio}."
+    duration = full_duration if duration is None else min(duration, full_duration)
+    num_trg_samples = int(sr * duration)
+
+    if duration == full_duration:
+        start_id = 0
+    elif clip_offset_strategy == 'random':
+        start_id = np.random.randint(0, waveform.shape[1] - num_trg_samples + 1)
+    elif clip_offset_strategy == 'max_mean':
+        assert False, "max_mean strategy is too slow, please use max_center instead."
+        start_id = max_mean_window_idx(waveform, window=num_trg_samples)
+    elif clip_offset_strategy == 'max_center':
+        max_val_id = waveform.abs().mean(dim=0).argmax().item()
+        start_id = max_val_id - num_trg_samples // 2
+        start_id = max(0, min(start_id, waveform.shape[1] - num_trg_samples))
+    elif clip_offset_strategy == 'start':
+        start_id = 0
+    else:
+        raise ValueError(f"Unsupported clip_offset_strategy: {clip_offset_strategy}. Supported strategies: ['random', 'max_mean', 'max_center', 'start'].")
+
+    waveform = waveform[:, start_id:start_id + num_trg_samples] # [c, num_trg_samples]
+
+    return waveform, sr
+
 
 def decode_audio_from_video_decoder(video_decoder: VideoDecoder, start_ts: float, end_ts: float | None = None) -> tuple[NDArray, int]:
     audio_stream = next(s for s in video_decoder.container.streams if s.type == 'audio')
@@ -252,6 +287,14 @@ def resize_waveform(waveform: torch.Tensor, target_length: int, mode: str='pad_o
         return torch.cat([waveform, padding], dim=-1) # [..., num_channels, target_length]
     else:
         return waveform[..., :target_length] # [..., num_channels, target_length]
+
+def max_mean_window_idx(x: torch.Tensor, window: int):
+    """Returns the starting index of the window with the maximum mean absolute value."""
+    assert x.ndim == 2, f"Expected a 2D tensor, got {x.shape}."
+    assert window > 0 and window <= x.shape[1], f"Window size {window} is out of bounds for tensor with shape {x.shape}."
+    kernel = torch.ones(1, 1, window, device=x.device) / window
+    means = torch.nn.functional.conv1d(x.abs().mean(0, keepdim=True).unsqueeze(0), kernel).squeeze()
+    return torch.argmax(means).item()
 
 #----------------------------------------------------------------------------
 # VAE latents processing functions.
