@@ -192,16 +192,17 @@ class AverageAudioTransform(BaseTransform):
 @beartype
 class ResizeAudioTransform(BaseTransform):
     """Resizes the audio by resampling it and then trimming or padding it to a specified duration."""
-    def __init__(self, audio_input_field: str, original_sr_input_field: str, target_audio_sr: int, output_field: str | None = None, **resampling_kwargs):
+    def __init__(self, audio_input_field: str, original_sr_input_field: str, target_audio_sr: int, output_field: str | None = None, clip_duration_field: str | None = None, **resampling_kwargs):
         self.audio_input_field = audio_input_field
         self.original_sr_input_field = original_sr_input_field
         self.output_field = output_field if output_field is not None else audio_input_field
         self.target_audio_sr = target_audio_sr
+        self.clip_duration_field = clip_duration_field
         self.resampling_kwargs = resampling_kwargs
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present={self.audio_input_field: torch.Tensor, self.original_sr_input_field: int}, absent=[])
-        clip_duration: float = sample[self.audio_input_field].shape[-1] / sample[self.original_sr_input_field]
+        clip_duration: float = (sample[self.audio_input_field].shape[-1] / sample[self.original_sr_input_field]) if self.clip_duration_field is None else sample[self.clip_duration_field]
         waveform = SDF.resample_waveform(waveform=sample[self.audio_input_field], orig_freq=sample[self.original_sr_input_field], new_freq=self.target_audio_sr, **self.resampling_kwargs)
         waveform = SDF.resize_waveform(waveform, target_length=int(self.target_audio_sr * clip_duration))
         sample[self.output_field] = waveform
@@ -287,14 +288,23 @@ class SampleVideoVAELatentTransform:
 class DecodeVideoAndAudioTransform(BaseTransform):
     """Decodes a video file and extracts both video and audio, returning both as tensors."""
     def __init__(
-            self, input_field: str, video_output_field: str,
-            audio_output_field: str, original_sr_output_field: str, num_frames: int, duration_field: str | None = None,
-            framerate_field: str | None = None, frame_timestamps_output_field: str | None = None, **decode_kwargs
-        ):
+        self,
+        input_field: str,
+        video_output_field: str,
+        audio_output_field: str,
+        original_sr_output_field: str,
+        num_frames: int,
+        duration_field: str | None = None,
+        framerate_field: str | None = None,
+        frame_timestamps_output_field: str | None = None,
+        duration_output_field: str | None = None,
+        **decode_kwargs,
+    ):
         self.input_field = input_field
         self.video_output_field = video_output_field
         self.audio_output_field = audio_output_field
         self.original_sr_output_field = original_sr_output_field
+        self.duration_output_field = duration_output_field
         self.duration_field = duration_field
         self.framerate_field = framerate_field
         self.num_frames = num_frames
@@ -305,12 +315,14 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         _validate_fields(sample, present=[self.input_field], absent=[self.audio_output_field, self.original_sr_output_field])
         real_duration = float(sample[self.duration_field]) if self.duration_field is not None else None
         real_framerate = float(sample[self.framerate_field]) if self.framerate_field is not None else None
-        video_data, frame_timestamps, _clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
+        video_data, frame_timestamps, clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
             sample[self.input_field], num_frames_to_extract=self.num_frames, real_duration=real_duration,
             real_framerate=real_framerate, **self.decode_kwargs, return_audio=True)
         sample[self.video_output_field] = video_data
         sample[self.audio_output_field] = waveform_data
         sample[self.original_sr_output_field] = waveform_sampling_rate
+        if self.duration_output_field is not None:
+            sample[self.duration_output_field] = clip_duration
         if self.frame_timestamps_output_field is not None:
             _validate_fields(sample, present=[], absent=[self.frame_timestamps_output_field])
             sample[self.frame_timestamps_output_field] = frame_timestamps
@@ -774,13 +786,20 @@ def create_standard_joint_video_audio_pipeline(
             video_output_field=video_output_field,
             audio_output_field=audio_output_field,
             original_sr_output_field='original_audio_sampling_rate',
+            duration_output_field='clip_duration',
             num_frames=num_frames,
             **decode_kwargs
         ),
         ResizeVideoTransform(input_field=video_output_field, resolution=resolution, **resize_kwargs),
         ConvertVideoToByteTensorTransform(input_field=video_output_field),
         ConvertAudioToFloatTensorTransform(input_field=audio_output_field),
-        ResizeAudioTransform(audio_input_field=audio_output_field, original_sr_input_field='original_audio_sampling_rate', target_audio_sr=target_audio_sr, **audio_resampling_kwargs),
+        ResizeAudioTransform(
+            audio_input_field=audio_output_field,
+            original_sr_input_field='original_audio_sampling_rate',
+            target_audio_sr=target_audio_sr,
+            clip_duration_field='clip_duration',
+            **audio_resampling_kwargs
+        ),
     ]
     if mono_audio:
         transforms.append(AverageAudioTransform(input_field=audio_output_field))

@@ -123,6 +123,9 @@ def main():
                 img_pair = img_pair.permute(1, 2, 0).cpu().numpy().astype('uint8') # [h, w, c]
                 Image.fromarray(img_pair).save(os.path.join('/tmp/where/to/download', f"{batch['src_media_id'][i]}-{batch['trg_media_id'][i]}.png"))
 
+                print('Input/output captions:')
+                print(' - ', batch['src_caption'][i])
+                print(' - ', batch['trg_caption'][i])
 
 if __name__ == '__main__':
     main()

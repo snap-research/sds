@@ -177,14 +177,14 @@ def decode_video(
         clip_duration = full_video_duration
         num_frames_to_extract = max(1, round(clip_duration * target_framerate))
 
-    start_frame_timestamp = np.random.rand() * max(full_video_duration - clip_duration, 0.0) if random_offset else 0.0
-    frame_timestamps = np.linspace(start_frame_timestamp, start_frame_timestamp + max(clip_duration - video_decoder.frame_duration, 0), num_frames_to_extract)
+    start_ts = np.random.rand() * max(full_video_duration - clip_duration, 0.0) if random_offset else 0.0
+    frame_timestamps = start_ts + np.linspace(0, max(clip_duration - video_decoder.frame_duration, 0), num_frames_to_extract)
     frame_timestamps = [t.item() for t in frame_timestamps if t <= full_video_duration] # Filter out timestamps that are beyond the video duration.
     decoding_fn = video_decoder.decode_frames_at_times_approx if approx_frame_seek else video_decoder.decode_frames_at_times
     frames = decoding_fn(frame_timestamps, frame_seek_timeout_sec=frame_seek_timeout_sec) # (num_frames, Image)
 
     if return_audio:
-        waveform, sampling_rate = decode_audio_from_video_decoder(video_decoder, start_ts=start_frame_timestamp, end_ts=start_frame_timestamp + clip_duration)
+        waveform, sampling_rate = decode_audio_from_video_decoder(video_decoder, start_ts=start_ts, end_ts=start_ts + clip_duration)
     else:
         waveform = sampling_rate = None
 
@@ -237,10 +237,7 @@ def decode_audio_from_video_decoder(video_decoder: VideoDecoder, start_ts: float
 
     # compute presentation timestamp
     start_pts = int(start_ts / time_base)
-
-    end_pts = None
-    if end_ts is not None:
-        end_pts = int(end_ts / time_base)
+    end_pts = int(end_ts / time_base) if end_ts is not None else None
 
     # Any frame disable seeking key frames which can be slower
     video_decoder.container.seek(start_pts, stream=audio_stream, any_frame=False)

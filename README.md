@@ -280,6 +280,7 @@ The entry point is the `StreamingDataset` class, which takes a source `src` and 
 - [ ] Support spawn start method for dataloader workers.
 - [ ] An option to cache the downloaded/loaded sample dict? Ideally, through some cache transform, i.e. so we can cache at any selected point in the transform chain. Then, we can store videos unpacked as np4/torch files and load them much faster.
 - [ ] `sds.utils.data_utils.read_parquet_slice` is not working for a wildcard of parquets.
+- [ ] Make the scripts/construct_index_from_bq.py runnable from command line. I.e. we can have an `sds` command line tool with subcommands.
 
 ### TODOs for v1.5:
 - [ ] Is it possible to make `construct_index_from_bq_small.py` work for large tables? It's logic is much cleaner...
