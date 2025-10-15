@@ -24,6 +24,7 @@ def create_audio_video_transforms_pipeline() -> list[Callable]:
             frame_timestamps_output_field='frame_timestamps',  # Save the actual timestamps of the decoded frames (in seconds).
         ),
         target_audio_sr=target_audio_sr,
+        target_audio_length=12345,
     )
 
     text_embs_transforms = [
@@ -79,7 +80,7 @@ def main():
             batch = next(data_iterator)
             print(f'Processing batch #{iteration + 1} with {len(batch["data_id"])} items.')
             print('batch __sample_key__', batch.get('__sample_key__', None))
-            print('Frame timestamps:', batch['frame_timestamps'])
+            print(f'Video shape: {batch["video"].shape}, Audio shape: {batch["audio"].shape}, Caption emb shape: {batch["caption_embedding"].shape}')
 
     print('Done')
 

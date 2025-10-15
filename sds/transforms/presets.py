@@ -192,20 +192,26 @@ class AverageAudioTransform(BaseTransform):
 @beartype
 class ResizeAudioTransform(BaseTransform):
     """Resizes the audio by resampling it and then trimming or padding it to a specified duration."""
-    def __init__(self, audio_input_field: str, original_sr_input_field: str, target_audio_sr: int, output_field: str | None = None, clip_duration_field: str | None = None, **resampling_kwargs):
+    def __init__(self, audio_input_field: str, original_sr_input_field: str, target_audio_sr: int, output_field: str | None = None, clip_duration_field: str | None = None, target_length: int | None = None, **resampling_kwargs):
         self.audio_input_field = audio_input_field
         self.original_sr_input_field = original_sr_input_field
         self.output_field = output_field if output_field is not None else audio_input_field
         self.target_audio_sr = target_audio_sr
         self.clip_duration_field = clip_duration_field
+        self.target_length = target_length
         self.resampling_kwargs = resampling_kwargs
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present={self.audio_input_field: torch.Tensor, self.original_sr_input_field: int}, absent=[])
-        clip_duration: float = (sample[self.audio_input_field].shape[-1] / sample[self.original_sr_input_field]) if self.clip_duration_field is None else sample[self.clip_duration_field]
-        waveform = SDF.resample_waveform(waveform=sample[self.audio_input_field], orig_freq=sample[self.original_sr_input_field], new_freq=self.target_audio_sr, **self.resampling_kwargs)
-        waveform = SDF.resize_waveform(waveform, target_length=int(self.target_audio_sr * clip_duration))
-        sample[self.output_field] = waveform
+        waveform = SDF.resample_waveform(waveform=sample[self.audio_input_field], orig_freq=sample[self.original_sr_input_field], new_freq=self.target_audio_sr, **self.resampling_kwargs) # [c, t]
+        if self.target_length is not None:
+            target_length = self.target_length # [1]
+        else:
+            # Inferring from clip duration.
+            clip_duration: float = (sample[self.audio_input_field].shape[-1] / sample[self.original_sr_input_field]) if self.clip_duration_field is None else sample[self.clip_duration_field]
+            target_length = int(self.target_audio_sr * clip_duration) # [1]
+        waveform = SDF.resize_waveform(waveform, target_length=target_length) # [c, t]
+        sample[self.output_field] = waveform # [c, t]
         return sample
 
 class NormalizeAudioTransform(BaseTransform):
@@ -775,6 +781,7 @@ def create_standard_joint_video_audio_pipeline(
     mono_audio: bool = True,
     normalize_audio: bool = True, # Whether to normalize the audio by waveform / waveform.abs().max() * 0.95
     target_audio_sr: int = 16000, # Audio sampling rate
+    target_audio_length: int | None = None, # Target audio length in the number of samples. If provided, overrides duration-based length.
     resize_kwargs: dict = {}, # Extra resizing parameters for ResizeVideoTransform
     audio_resampling_kwargs: dict = {}, # Extra resampling parameters for ResizeAudioTransform
     video_output_field: str = 'video', # In which field should we store the video result.
@@ -798,6 +805,7 @@ def create_standard_joint_video_audio_pipeline(
             original_sr_input_field='original_audio_sampling_rate',
             target_audio_sr=target_audio_sr,
             clip_duration_field='clip_duration',
+            target_length=target_audio_length,
             **audio_resampling_kwargs
         ),
     ]
