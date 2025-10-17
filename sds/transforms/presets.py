@@ -75,22 +75,28 @@ class ConvertImageToByteTensorTransform(BaseTransform):
 class DecodeVideoTransform(BaseTransform):
     """A video transform which decodes a video file into a list of frames."""
     def __init__(self, input_field: str, num_frames: int, output_field: str | None = None, duration_field: str | None = None,
-                framerate_field: str | None = None, frame_timestamps_output_field: str | None = None, **decode_kwargs):
+                framerate_field: str | None = None, frame_timestamps_input_field: str | None = None, frame_timestamps_output_field: str | None = None, **decode_kwargs):
         self.input_field = input_field
         self.output_field = output_field if output_field is not None else input_field
         self.num_frames = num_frames
         self.duration_field = duration_field
         self.framerate_field = framerate_field
         self.frame_timestamps_output_field = frame_timestamps_output_field
+        self.frame_timestamps_input_field = frame_timestamps_input_field # From where to read the frame timestamps, if provided.
         self.decode_kwargs = decode_kwargs
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[])
         real_duration = float(sample[self.duration_field]) if self.duration_field is not None else None
         real_framerate = float(sample[self.framerate_field]) if self.framerate_field is not None else None
+        if self.frame_timestamps_input_field is not None:
+            _validate_fields(sample, present=[self.frame_timestamps_input_field], absent=[])
+            frame_timestamps = sample[self.frame_timestamps_input_field]
+        else:
+            frame_timestamps = None
         sample[self.output_field], frame_timestamps, _clip_duration, _waveform, _audio_sr = SDF.decode_video(
             video_file=sample[self.input_field], num_frames_to_extract=self.num_frames,
-            real_duration=real_duration, real_framerate=real_framerate, **self.decode_kwargs)
+            real_duration=real_duration, real_framerate=real_framerate, frame_timestamps=frame_timestamps, **self.decode_kwargs)
         if self.frame_timestamps_output_field is not None:
             _validate_fields(sample, present=[], absent=[self.frame_timestamps_output_field])
             sample[self.frame_timestamps_output_field] = frame_timestamps
