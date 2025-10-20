@@ -1,0 +1,51 @@
+bq_project: "research-prototypes"
+sql_query: >
+  SELECT distinct
+    vidinfo.file_id AS data_id,
+    video_paths.fpaths AS data_url,
+    vidinfo.framerate,
+    vidinfo.duration,
+    vidinfo.global_start_s,
+    vidinfo.global_end_s,
+    vidinfo.original_height AS height,
+    vidinfo.original_width AS width,
+    audio_summary.text AS audio_short_caption,
+    audio_mettadata.audio_channels,
+    autocap_summary_text.text AS caption,
+    summary_text_embeddings.data_url AS short_caption_embedding,
+    audio_summary_text_embeddings.data_url AS audio_short_caption_embedding
+  FROM
+    `research-prototypes.generative_ai_data_platform_test.audio_vggsound_audioset_autocap_vidinfo` AS vidinfo
+  INNER JOIN
+    perc-dev.hcoskun_dev.vggsound_audioset_autocap_video_paths AS video_paths
+  ON
+    video_paths.video_id= vidinfo.file_id
+  INNER JOIN
+    `research-prototypes.generative_ai_data_platform_test.audio_vggsound_audioset_autocap_audio_summary_text` AS audio_summary
+  ON
+    audio_summary.file_id=vidinfo.file_id
+  INNER JOIN
+    `research-prototypes.generative_ai_data_platform_test.audio_vggsound_audioset_autocap_audio_mettadata` AS audio_mettadata
+  ON
+    audio_mettadata.file_id=vidinfo.file_id
+  INNER JOIN
+    `research-prototypes.generative_ai_data_platform_test.audio_vggsound_audioset_autocap_summary_text` AS autocap_summary_text
+  ON
+    autocap_summary_text.file_id=vidinfo.file_id
+  INNER JOIN
+    research-prototypes.generative_ai_data_platform_test.avlink_webdataset_untar_vggsound_audioset_autocap_summary_text_embeddings_t5_11b AS summary_text_embeddings
+  ON
+    SPLIT(summary_text_embeddings.stem, ".")[SAFE_OFFSET(0)]=vidinfo.file_id
+  INNER JOIN
+    research-prototypes.generative_ai_data_platform_test.avlink_webdataset_untar_vggsound_audioset_autocap_audio_summary_text_embeddings_t5_11b AS audio_summary_text_embeddings
+  ON
+    SPLIT(audio_summary_text_embeddings.stem, ".")[SAFE_OFFSET(0)]=vidinfo.file_id
+  ORDER BY RAND()
+s3_destination_path: s3://snap-genvid-us-east-2/datasets/sds-index-files/vggsounds.parquet
+s3_bucket_region: us-east-2 # The region of the S3 bucket. Can be left empty, but would lead to an error in case of a mismatch between $AWS_REGION in the env and the actual region of the bucket.
+recompute: true
+val_ratio: 0.1 # The fraction of the dataset to use for validation dataset.
+max_num_val_rows: 2048 # The maximum number of rows in the validation dataset.
+local_tmp_dir: ~ # Local temporary directory where the merged parquet will be saved to if provided (needed for large 20M+ rows outputs). You can likely use `/lssd/index-exports-tmp`.
+gcs_tmp_dir: ~ # Where to save intermediate results (needed for huge 70M+ rows outputs). You can likely use `gs://dlahiri/index-exports-tmp`
+row_group_size: 20000 # Number of rows per parquet row group.

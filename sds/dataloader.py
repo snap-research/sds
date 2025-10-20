@@ -158,7 +158,7 @@ class MultiStreamDataLoader:
             self,
             datasets: list[torch.utils.data.Dataset],
             stream_opts: list[StreamOptions],
-            num_workers: int = 0,
+            num_workers: int | list[int] = 0,
             shuffle_seed: int | None = 42,
             schedule: str = 'fixed_random_order',
             counts_precision: int = 6,
@@ -166,15 +166,13 @@ class MultiStreamDataLoader:
             persistent_workers=True, # We rely on the workers persistency to increment the epoch...
             **common_dataloader_kwargs,
         ):
-        assert num_workers == 0 or num_workers >= len(stream_opts), f"num_workers ({num_workers}) must be 0 or at least the number of stream_opts ({len(stream_opts)})."
         assert len(datasets) == len(stream_opts), f"Number of datasets ({len(datasets)}) must match the number of stream configs ({len(stream_opts)})."
 
         stream_ratios = np.array([s.ratio for s in stream_opts])
-        unused_stream_id = np.where(stream_ratios <= 0)[0]
-        datasets = [d for i, d in enumerate(datasets) if i not in unused_stream_id]
-        stream_opts = [s for i, s in enumerate(stream_opts) if i not in unused_stream_id]
-        worker_ratios = stream_ratios if reweight_workers else ([1 / len(stream_opts)] * len(stream_opts))
-        worker_counts = MultiStreamDataLoader.split_across_consumers(worker_ratios, num_workers) if num_workers > 0 else [0] * len(stream_opts)
+        unused_stream_ids = np.where(stream_ratios <= 0)[0]
+        datasets = [d for i, d in enumerate(datasets) if i not in unused_stream_ids]
+        stream_opts = [s for i, s in enumerate(stream_opts) if i not in unused_stream_ids]
+        worker_counts = self._compute_worker_counts(num_workers, stream_ratios, reweight_workers)
 
         # Unfortunately, we have a nasty "business logic" for how we mix the streams across GPUs. This makes us recompute ratios/counts for each mixing group.
         # We now have the notion of a "meta-iteration", for which we iterate over all the streams.
@@ -197,6 +195,27 @@ class MultiStreamDataLoader:
 
         self._main_stream_id = next(i for i, s in enumerate(self.streams) if s.opts.is_main) if any(s.opts.is_main for s in self.streams) else np.argmax(stream_ratios)
         self._num_batches_yielded = 0
+
+    @beartype
+    def _compute_worker_counts(self, num_workers: int | list[int], stream_ratios: np.ndarray, reweight_workers: bool) -> list[int]:
+        unused_stream_ids = np.where(np.array(stream_ratios) <= 0)[0]
+        active_stream_ids = [i for i in range(len(stream_ratios)) if i not in unused_stream_ids]
+
+        if isinstance(num_workers, list):
+            assert not reweight_workers, "If num_workers is a list, reweight_workers must be False."
+            assert (len(num_workers) == len(stream_ratios) and all(nw >= 0 for nw in num_workers)), \
+                f"If num_workers is a list, it must have the same length as input streams ({len(stream_ratios)}) and contain non-negative integers."
+            worker_counts = num_workers
+        else:
+            assert num_workers == 0 or num_workers >= len(stream_ratios), f"num_workers ({num_workers}) must be 0 or at least the number of active streams ({len(active_stream_ids)})."
+            worker_ratios = stream_ratios if reweight_workers else ([1 / len(stream_ratios)] * len(stream_ratios))
+            worker_counts = MultiStreamDataLoader.split_across_consumers(worker_ratios, num_workers) if num_workers > 0 else ([0] * len(stream_ratios))
+
+        worker_counts = [nw for i, nw in enumerate(worker_counts) if i not in unused_stream_ids]
+
+        assert len(worker_counts) == len(active_stream_ids), f"Computed worker counts ({len(worker_counts)}) must match the number of active streams ({len(active_stream_ids)})."
+
+        return worker_counts
 
     @staticmethod
     def split_across_consumers(ratios: list[float], total: int) -> list[int]:

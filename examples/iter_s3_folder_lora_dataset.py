@@ -1,11 +1,11 @@
 import os; os.environ['SDS_LOG_LEVEL'] = 'DEBUG'#; os.environ['AWS_REGION']='us-east-2'  # Set AWS region if needed
-import time
+from typing import Callable
+
 from sds.dataset import StreamingDataset
 from sds.transforms import presets
 from sds.dataloader import MultiStreamDataLoader, StreamOptions
 
-def main():
-    now = time.time()
+def build_transforms_pipeline() -> list[Callable]:
     video_transforms = presets.create_standard_video_pipeline(
         video_field='mp4',
         num_frames=16,
@@ -33,12 +33,16 @@ def main():
     # ]
     text_embs_transforms = []
 
+    return video_transforms + text_embs_transforms
+
+
+def init_s3_folder_dataset() -> StreamingDataset:
     # The original init can take a bit of time, since it downloads the index metadata (400Mb in the case below).
     dataset = StreamingDataset(
         src='s3://snap-genvid-us-east-2/datasets/snapvideo_lora_webtool/250905_hair_growth_rerun_pl_37b1ef33/dataset_tmp/',
         dst='ignore/sv3-lora',
         data_type='video',
-        transforms=video_transforms + text_embs_transforms,
+        transforms=build_transforms_pipeline(),
         columns_to_download=['mp4', 'summary_text.json', 'summary_text_embeddings.pkl', 'vidinfo.json'],
         index_col_name='index',
         num_downloading_workers=1,
@@ -51,10 +55,13 @@ def main():
         print_traceback=True,
         unaligned_worker_index=True,
     )
-    print(f'Init took {time.time() - now:.2f} seconds')
+
+    return dataset
+
+def main():
+    dataset = init_s3_folder_dataset()
 
     for epoch in range(1, 2):
-        now = time.time()
         stream_opts = StreamOptions.init_group([dict(name='stream1', batch_gpu=2, num_accum_rounds=2, is_main=True, ratio=0.5, mixing_group_id=0)], mixing_strategy='custom')
         dataloader = MultiStreamDataLoader(
             datasets=[dataset],

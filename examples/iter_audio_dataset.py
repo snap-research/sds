@@ -7,7 +7,7 @@ import torchaudio
 from sds.transforms import presets
 
 
-def create_audio_transforms_pipeline() -> list[Callable]:
+def build_audio_transforms_pipeline() -> list[Callable]:
     target_audio_sr = 44100  # Target audio sample rate
     audio_transforms = presets.create_standard_audio_pipeline(
         audio_field='data_url',
@@ -28,12 +28,12 @@ def create_audio_transforms_pipeline() -> list[Callable]:
     return audio_transforms
 
 
-def create_audio_video_dataset():
+def init_audio_dataset():
     dataset = StreamingDataset(
         # src='s3://snap-genvid-us-east-2/datasets/sds-index-files/iskorokhodov/av/bbc-sounds.parquet',
         src='s3://snap-genvid-us-east-2/datasets/sds-index-files/iskorokhodov/av/bbc-sounds-val.parquet',
         dst='data/bbc-sounds',
-        transforms=create_audio_transforms_pipeline(),
+        transforms=build_audio_transforms_pipeline(),
         columns_to_download=['data_url'],
         index_col_name='data_id',
         num_downloading_workers=3,
@@ -54,7 +54,7 @@ def create_audio_video_dataset():
 
 
 def main():
-    dataset = create_audio_video_dataset()
+    dataset = init_audio_dataset()
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=3, num_workers=4, pin_memory=True, drop_last=True)
     data_iterator = iter(dataloader)
 

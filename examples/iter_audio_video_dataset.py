@@ -6,7 +6,7 @@ from sds.dataset import StreamingDataset
 from sds.transforms import presets
 
 
-def create_audio_video_transforms_pipeline() -> list[Callable]:
+def build_audio_video_transforms_pipeline() -> list[Callable]:
     target_audio_sr = 44100  # Target audio sample rate
     video_transforms = presets.create_standard_joint_video_audio_pipeline(
         video_field='data_url',
@@ -45,12 +45,12 @@ def create_audio_video_transforms_pipeline() -> list[Callable]:
     return video_transforms + text_embs_transforms
 
 
-def create_audio_video_dataset():
-    dataset = StreamingDataset(
-        src='s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/video_audio/67f9ac1f7a6d4ba2a418c2f3ab9731e9/000000000176-last10k.parquet',
+def init_audio_video_dataset() -> StreamingDataset:
+    return StreamingDataset(
+        src='s3://snap-genvid/iskorokhodov/snapvideo_3_datasets/video_audio/67f9ac1f7a6d4ba2a418c2f3ab9731e9/000000000176-last10k.parquet',
         dst='ignore/sv3',
         data_type='video',
-        transforms=create_audio_video_transforms_pipeline(),
+        transforms=build_audio_video_transforms_pipeline(),
         columns_to_download=['data_url', 'short_caption_embedding', 'long_caption_embedding'],
         index_col_name='data_id',
         num_downloading_workers=1,
@@ -68,11 +68,9 @@ def create_audio_video_dataset():
         infinite_iteration=True,
     )
 
-    return dataset
-
 
 def main():
-    dataset = create_audio_video_dataset()
+    dataset = init_audio_video_dataset()
     dataloader = torch.utils.data.DataLoader(dataset, num_workers=4, pin_memory=True, drop_last=True)
     data_iterator = iter(dataloader)
 

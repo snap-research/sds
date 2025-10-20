@@ -1,7 +1,5 @@
 import os
 from typing import Callable
-os.environ['AWS_REGION'] = 'us-west-2' # Make sure that AWS_REGION is set to the region of your S3 bucket.
-os.environ['SDS_LOG_LEVEL'] = 'DEBUG' # Set the log level to DEBUG to see more logs.
 
 import numpy as np
 import torch
@@ -60,8 +58,8 @@ class SampleRandomImagePairTransform:
         return sample
 
 
-def main():
-    dataset = StreamingDataset(
+def init_img2img_dataset() -> StreamingDataset:
+    return StreamingDataset(
         src='s3://snap-genvid/datasets/sds-index-files/gss-personalization.parquet',
         dst='/tmp/where/to/download',      # Where to download the samples.
         transforms=build_transforms(),     # A list of transforms to apply.
@@ -104,8 +102,10 @@ def main():
         print_traceback=True,
     )
 
-    # Note: we have (slow) random access!
-    sample = dataset[12345]
+
+def main():
+    dataset = init_img2img_dataset()
+    sample = dataset[12345] # Note: we have (slow) random access!
     img_pair = torch.cat([sample['src_image'], sample['trg_image']], dim=2) # [c, h, w*2]
     img_pair = img_pair.permute(1, 2, 0).cpu().numpy().astype('uint8') # [h, w, c]
     Image.fromarray(img_pair).save('/tmp/where/to/download/debug-sample-12345.png')
@@ -128,4 +128,6 @@ def main():
                 print(' - ', batch['trg_caption'][i])
 
 if __name__ == '__main__':
+    os.environ['AWS_REGION'] = 'us-west-2' # Make sure that AWS_REGION is set to the region of your S3 bucket.
+    os.environ['SDS_LOG_LEVEL'] = 'DEBUG' # Set the log level to DEBUG to see more logs.
     main()

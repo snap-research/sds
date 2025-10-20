@@ -7,7 +7,7 @@ from sds.dataset import StreamingDataset
 from sds.transforms import presets
 
 
-def create_video_transforms_pipeline(is_target_video: bool=False) -> list[Callable]:
+def build_video_transforms_pipeline(is_target_video: bool=False) -> list[Callable]:
     if is_target_video:
         # In target transforms, we pick up the saved frame timestamps from the source transforms.
         frame_timestamp_kwargs = dict(frame_timestamps_output_field=None, frame_timestamps_input_field='frame_timestamps')
@@ -35,9 +35,9 @@ def create_video_transforms_pipeline(is_target_video: bool=False) -> list[Callab
     return video_transforms
 
 
-def create_video2video_dataset():
-    src_transforms = create_video_transforms_pipeline(is_target_video=False)
-    trg_transforms = create_video_transforms_pipeline(is_target_video=True)
+def init_video2video_dataset():
+    src_transforms = build_video_transforms_pipeline(is_target_video=False)
+    trg_transforms = build_video_transforms_pipeline(is_target_video=True)
     dataset = StreamingDataset(
         src='s3://snap-genvid-us-east-2/iskorokhodov/snapvideo_3_datasets/video_audio/67f9ac1f7a6d4ba2a418c2f3ab9731e9/000000000176-last10k.parquet',
         dst='data/v2v',
@@ -62,7 +62,7 @@ def create_video2video_dataset():
 
 
 def main():
-    dataset = create_video2video_dataset()
+    dataset = init_video2video_dataset()
     dataloader = torch.utils.data.DataLoader(dataset, num_workers=4, pin_memory=True, drop_last=True)
     data_iterator = iter(dataloader)
 
