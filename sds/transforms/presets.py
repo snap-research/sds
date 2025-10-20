@@ -308,6 +308,7 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         num_frames: int,
         duration_field: str | None = None,
         framerate_field: str | None = None,
+        frame_timestamps_input_field: str | None = None,
         frame_timestamps_output_field: str | None = None,
         duration_output_field: str | None = None,
         **decode_kwargs,
@@ -321,15 +322,21 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         self.framerate_field = framerate_field
         self.num_frames = num_frames
         self.decode_kwargs = decode_kwargs
+        self.frame_timestamps_input_field = frame_timestamps_input_field
         self.frame_timestamps_output_field = frame_timestamps_output_field
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[self.audio_output_field, self.original_sr_output_field])
         real_duration = float(sample[self.duration_field]) if self.duration_field is not None else None
         real_framerate = float(sample[self.framerate_field]) if self.framerate_field is not None else None
+        if self.frame_timestamps_input_field is not None:
+            _validate_fields(sample, present=[self.frame_timestamps_input_field], absent=[])
+            frame_timestamps = sample[self.frame_timestamps_input_field]
+        else:
+            frame_timestamps = None
         video_data, frame_timestamps, clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
             sample[self.input_field], num_frames_to_extract=self.num_frames, real_duration=real_duration,
-            real_framerate=real_framerate, **self.decode_kwargs, return_audio=True)
+            real_framerate=real_framerate, frame_timestamps=frame_timestamps, **self.decode_kwargs, return_audio=True)
         sample[self.video_output_field] = video_data
         sample[self.audio_output_field] = waveform_data
         sample[self.original_sr_output_field] = waveform_sampling_rate
