@@ -352,7 +352,11 @@ class StreamingDataset(IterableDataset):
     def _iter_chunks_(self, index_iterator: Iterator[pd.DataFrame], global_worker_rank: int, scheduled_samples: dict[str, dict[str, Any]]) -> Iterator[dict[str, Any]]:
         logger.debug(f'[{self.name} | rank {dist_utils.get_rank()} | worker_rank {global_worker_rank}/{dist_utils.get_world_size()}] Starting to iterate over the dataset {self.name}. Epoch: {self.epoch}, sample_in_epoch: {self.sample_in_epoch}.')
         scheduling_kwargs = dict(scheduled_samples=scheduled_samples, shuffle_seed=self.shuffle_seed, epoch=self.epoch, global_worker_rank=global_worker_rank)
-        self._schedule_downloads_(next(index_iterator), **scheduling_kwargs)
+        first_chunk = next(index_iterator, None)
+        if first_chunk is None:
+            logger.error(f'[{self.name}] No first chunk found. The dataset is empty or we are resuming too late in the epoch?')
+            return
+        self._schedule_downloads_(first_chunk, **scheduling_kwargs)
 
         for sample_key, (total_sample_size, total_download_size) in self.downloader.yield_completed():
             self._stored_sample_keys.append(sample_key)
@@ -490,21 +494,19 @@ class LazyIndexIterator:
 
     def __next__(self) -> pd.DataFrame:
         """Returns the next prefetched index chunk. Blocks until a chunk is available."""
-        try:
-            for task_result in self._pool.yield_completed():
-                if task_result['success']:
-                    if task_result['task_output'].empty:
-                        logger.warning(f"Index slice is empty for {self.path} [{task_result['task_input']['start']}:{task_result['task_input']['end']}]. This might be due to an empty index or a SQL query that filtered out all rows.")
-                        continue
-                    return task_result['task_output']
-                else:
-                    # Propagate the error from the worker thread to the main thread
-                    logger.error(f"Failed to prefetch index chunk: {task_result['error']}")
+        for task_result in self._pool.yield_completed():
+            if task_result['success']:
+                if task_result['task_output'].empty:
+                    logger.warning(f"Index slice is empty for {self.path} [{task_result['task_input']['start']}:{task_result['task_input']['end']}]. This might be due to an empty index or a SQL query that filtered out all rows.")
                     continue
-        except StopIteration:
-            # All tasks are done, ensure the pool is shut down before we stop
-            self.shutdown()
-            raise
+                return task_result['task_output']
+            else:
+                # Propagate the error from the worker thread to the main thread
+                logger.error(f"Failed to prefetch index chunk: {task_result['error']}")
+                continue
+
+        self.shutdown()
+        raise StopIteration # We are done with all the chunks.
 
     def shutdown(self):
         if self._pool:
