@@ -463,6 +463,8 @@ class LazyIndexIterator:
         self.chunk_size_refined = math.floor(num_samples_per_worker / num_chunks)
         self.partition_start_sample_id = partition_rank * num_samples_per_worker
 
+        logger.debug(f"[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Sample space: [{self.partition_start_sample_id}:{self.partition_start_sample_id + num_samples_per_worker}] ({num_samples_per_worker} samples), chunk size: {self.chunk_size_refined}, total chunks: {num_chunks}.")
+
         # --- Determine the order of chunks to process ---
         chunk_order = misc.get_shuffled_sample_ids(num_chunks, shuffle_seed=shuffle_seed, epoch=epoch, rank=self.global_worker_rank)
 
@@ -510,7 +512,7 @@ class LazyIndexIterator:
 
     def shutdown(self):
         if self._pool:
-            logger.debug("Shutting down LazyIndexIterator's thread pool.")
+            logger.debug(f"[rank {dist_utils.get_rank()} | worker_rank {self.global_worker_rank}/{self.global_num_workers}] Shutting down LazyIndexIterator thread pool.")
             self._pool.shutdown()
 
     def __del__(self):
