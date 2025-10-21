@@ -512,7 +512,6 @@ class LazyIndexIterator:
         if self._pool:
             logger.debug("Shutting down LazyIndexIterator's thread pool.")
             self._pool.shutdown()
-            self._pool = None
 
     def __del__(self):
         if hasattr(self, '_pool') and self._pool is not None:

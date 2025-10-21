@@ -32,7 +32,5 @@ def main():
         print(f'[iter {i}] Stream: {batch.stream_name}, data_type: {batch.data_type}, num_accum_rounds_left: {batch.num_accum_rounds_left}')
         print(f'[iter {i}] Batch keys', batch.keys())
 
-
-
 if __name__ == '__main__':
     main()
