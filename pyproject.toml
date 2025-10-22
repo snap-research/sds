@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "streaming-dataset"
-version = "0.5.9"
+version = "0.5.10"
 authors = [
   { name="Snap", email="iskorokhodov@snap.com" },
 ]

@@ -341,7 +341,7 @@ class DecodeVideoAndAudioTransform(BaseTransform):
             sample[self.input_field], num_frames_to_extract=self.num_frames, real_duration=real_duration,
             real_framerate=real_framerate, frame_timestamps=frame_timestamps, **self.decode_kwargs, return_audio=True)
         if self.silent_audio_thresh is not None:
-            max_amplitude = waveform_data.abs().max().item()
+            max_amplitude = np.abs(waveform_data).max().item()
             assert max_amplitude >= self.silent_audio_thresh, f"Audio is too silent: max amplitude {max_amplitude} < threshold {self.silent_audio_thresh}."
         sample[self.video_output_field] = video_data
         sample[self.audio_output_field] = waveform_data
