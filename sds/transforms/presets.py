@@ -18,6 +18,7 @@ import sds.transforms.functional as SDF
 
 #----------------------------------------------------------------------------
 # Base transforms.
+
 class BaseTransform:
     """Base class for all transforms. Provides a common interface."""
     def __init__(self, input_field: str, output_field: str | None = None, **transform_kwargs):
@@ -311,6 +312,7 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         frame_timestamps_input_field: str | None = None,
         frame_timestamps_output_field: str | None = None,
         duration_output_field: str | None = None,
+        silent_audio_thresh: float | None = None, # If provided, will throw an error if the decoded audio is too silent.
         **decode_kwargs,
     ):
         self.input_field = input_field
@@ -324,6 +326,7 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         self.decode_kwargs = decode_kwargs
         self.frame_timestamps_input_field = frame_timestamps_input_field
         self.frame_timestamps_output_field = frame_timestamps_output_field
+        self.silent_audio_thresh = silent_audio_thresh
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[self.audio_output_field, self.original_sr_output_field])
@@ -337,6 +340,9 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         video_data, frame_timestamps, clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
             sample[self.input_field], num_frames_to_extract=self.num_frames, real_duration=real_duration,
             real_framerate=real_framerate, frame_timestamps=frame_timestamps, **self.decode_kwargs, return_audio=True)
+        if self.silent_audio_thresh is not None:
+            max_amplitude = waveform_data.abs().max().item()
+            assert max_amplitude >= self.silent_audio_thresh, f"Audio is too silent: max amplitude {max_amplitude} < threshold {self.silent_audio_thresh}."
         sample[self.video_output_field] = video_data
         sample[self.audio_output_field] = waveform_data
         sample[self.original_sr_output_field] = waveform_sampling_rate
