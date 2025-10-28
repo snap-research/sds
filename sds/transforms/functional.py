@@ -22,6 +22,11 @@ except Exception as e:
     logger.error(f"torchaudio installation is broken: {e}")
     torchaudio = None
 
+try:
+    import audiotools
+except ImportError:
+    audiotools = None
+
 from sds.structs import VIDEO_EXT
 from sds.transforms.video_decoder import VideoDecoder
 from sds.utils import os_utils
@@ -204,10 +209,17 @@ def decode_video(
 def decode_audio(
     audio_file_path: str,
     duration: float | None = None,
-    clip_offset_strategy: str = 'random', # 'random' | 'max_mean' | 'max_center' | 'start' | 'random_loud'
+    clip_offset_strategy: str = 'random',
     allow_shorter_audio: bool = False,
+    loudness_cutoff: float = -40.0, # in dBFS, only used for 'max_random_loud' strategy.
 ) -> tuple[torch.Tensor, int]:
     """Decodes the audio waveform from wav/mp3/flac file or bytes."""
+    if clip_offset_strategy == 'max_random_loud':
+        assert audiotools is not None, "audiotools is not available, please run: `pip install git+https://github.com/descriptinc/audiotools`"
+        audio_signal = audiotools.AudioSignal.salient_excerpt(audio_file_path, duration=duration, loudness_cutoff=loudness_cutoff)
+        assert audio_signal.audio_data.shape[0] == 1, f'Wrong batch size from audiotools: {audio_signal.audio_data.shape}.'
+        return audio_signal.audio_data.squeeze(0), audio_signal.sample_rate
+
     waveform, sr = torchaudio.load(audio_file_path)
     full_duration = waveform.shape[1] / sr
     assert duration is None or full_duration >= duration or allow_shorter_audio, f"Audio duration {full_duration} is shorter than the requested duration {duration} while allow_shorter_audio={allow_shorter_audio}."
