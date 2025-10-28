@@ -210,8 +210,11 @@ for i, batch in enumerate(dataloader):
 
 - Set `num_workers=0` in the dataloader.
 - Set `print_exceptions=True` and `print_traceback=True` in the dataset to see what is going wrong.
+- Set `SDS_LOG_LEVEL=DEBUG` in the env to see detailed internal logs.
+- Make sure that you are using the latest version of the package: new versions can fix old bugs.
+- Make sure that you are not using the latest version of the package: new versions can introduce new bugs.
 - Make sure you are on the right version: new versions can break backward compatibility.
-- If the dataloader is slow, try varying `prefetch`, `num_downloading_workers`, `num_workers` and varying lazy indexing parameters.
+- If the dataloader is slow, try varying 1) `prefetch_factor` and `num_workers` in the dataloader; 2) `prefetch` and `num_downloading_workers` in the dataset; and 3) varying lazy indexing parameters.
 
 ## How it works
 The entry point is the `StreamingDataset` class, which takes a source `src` and arguments and does the following:

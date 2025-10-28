@@ -204,7 +204,7 @@ def decode_video(
 def decode_audio(
     audio_file_path: str,
     duration: float | None = None,
-    clip_offset_strategy: str = 'start', # 'random' | 'max_mean' | 'max_center' | 'start'
+    clip_offset_strategy: str = 'random', # 'random' | 'max_mean' | 'max_center' | 'start' | 'random_loud'
     allow_shorter_audio: bool = False,
 ) -> tuple[torch.Tensor, int]:
     """Decodes the audio waveform from wav/mp3/flac file or bytes."""
@@ -219,7 +219,6 @@ def decode_audio(
     elif clip_offset_strategy == 'random':
         start_id = np.random.randint(0, waveform.shape[1] - num_trg_samples + 1)
     elif clip_offset_strategy == 'max_mean':
-        assert False, "max_mean strategy is too slow, please use max_center instead."
         start_id = max_mean_window_idx(waveform, window=num_trg_samples)
     elif clip_offset_strategy == 'max_center':
         max_val_id = waveform.abs().mean(dim=0).argmax().item()
@@ -293,9 +292,10 @@ def max_mean_window_idx(x: torch.Tensor, window: int):
     """Returns the starting index of the window with the maximum mean absolute value."""
     assert x.ndim == 2, f"Expected a 2D tensor, got {x.shape}."
     assert window > 0 and window <= x.shape[1], f"Window size {window} is out of bounds for tensor with shape {x.shape}."
-    kernel = torch.ones(1, 1, window, device=x.device) / window
-    means = torch.nn.functional.conv1d(x.abs().mean(0, keepdim=True).unsqueeze(0), kernel).squeeze()
-    return torch.argmax(means).item()
+    x = x.abs().mean(0) # [t]
+    cumsum = x.cumsum(dim=0) # [t]
+    cumsum_window = cumsum[window:] - cumsum[:-window] # [t - window]
+    return torch.argmax(cumsum_window).item()
 
 #----------------------------------------------------------------------------
 # VAE latents processing functions.

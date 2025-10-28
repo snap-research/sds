@@ -16,7 +16,8 @@ def build_audio_transforms_pipeline() -> list[Callable]:
         audio_decoding_kwargs=dict(
             # random_offset=False, max_mean_offset=True, # Sampling the loudest audio segment.
             # random_offset=True, max_mean_offset=False,
-            clip_offset_strategy='max_center',
+            # clip_offset_strategy='max_center',
+            clip_offset_strategy='max_mean',
             allow_shorter_audio=False,
         ),
         audio_resampling_kwargs=dict(
