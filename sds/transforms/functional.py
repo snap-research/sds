@@ -211,10 +211,10 @@ def decode_audio(
     duration: float | None = None,
     clip_offset_strategy: str = 'random',
     allow_shorter_audio: bool = False,
-    loudness_cutoff: float = -40.0, # in dBFS, only used for 'max_random_loud' strategy.
+    loudness_cutoff: float = -40.0, # in dBFS, only used for 'random_loud' strategy.
 ) -> tuple[torch.Tensor, int]:
     """Decodes the audio waveform from wav/mp3/flac file or bytes."""
-    if clip_offset_strategy == 'max_random_loud':
+    if clip_offset_strategy == 'random_loud':
         assert audiotools is not None, "audiotools is not available, please run: `pip install git+https://github.com/descriptinc/audiotools`"
         audio_signal = audiotools.AudioSignal.salient_excerpt(audio_file_path, duration=duration, loudness_cutoff=loudness_cutoff)
         assert audio_signal.audio_data.shape[0] == 1, f'Wrong batch size from audiotools: {audio_signal.audio_data.shape}.'
@@ -239,7 +239,7 @@ def decode_audio(
     elif clip_offset_strategy == 'start':
         start_id = 0
     else:
-        raise ValueError(f"Unsupported clip_offset_strategy: {clip_offset_strategy}. Supported strategies: ['random', 'max_mean', 'max_center', 'start'].")
+        raise ValueError(f"Unsupported clip_offset_strategy: {clip_offset_strategy}.")
 
     waveform = waveform[:, start_id:start_id + num_trg_samples] # [c, num_trg_samples]
 
