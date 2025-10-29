@@ -1,0 +1,92 @@
+bq_project: "research-prototypes"
+sql_query: |
+  WITH
+    TopPredictionsPerChunk AS (
+      SELECT
+        audio_clf_meta.data_id,
+        audio_clf_meta.workflow_id,
+        audio_clf_meta_chunks.chunk_id,
+        audio_clf_meta_chunks.chunk_duration,
+        audio_clf_meta_chunk_preds.class_id AS top_class_id,
+        audio_clf_meta_chunk_preds.class_name AS top_class_name,
+        audio_clf_meta_chunk_preds.probability AS top_probability
+      FROM research-prototypes.generative_ai_data_platform.hcoskun_annotation_audio_classification_3s_full AS audio_clf_meta
+      LEFT JOIN UNNEST(audio_clf_meta.chunks) AS audio_clf_meta_chunks
+      LEFT JOIN UNNEST(audio_clf_meta_chunks.predictions) AS audio_clf_meta_chunk_preds
+      -- Filter to get ONLY the prediction with rank 0
+      WHERE audio_clf_meta_chunk_preds.rank = 0
+    ),
+    AudioChunkClass AS (
+      SELECT
+        data_id,
+        workflow_id,
+        ARRAY_AGG(
+          STRUCT( chunk_id, chunk_duration, top_class_id, top_class_name, top_probability )
+          ORDER BY chunk_id -- Order the array by chunk_id to keep it sequential
+        ) AS top_chunk_predictions
+      FROM TopPredictionsPerChunk
+      GROUP BY data_id, workflow_id
+    )
+  SELECT DISTINCT
+    data.data_id,
+    data.data_url,
+    data.dataset_name,
+    video_meta.num_frames,
+    video_meta.duration_s,
+    video_meta.bitrate,
+    captions.caption AS video_captions,
+    video_meta.width,
+    video_meta.height,
+    audio_meta.unique_channels_count,
+    audio_meta.score AS audio_score,
+    a_class_table.top_chunk_predictions,
+    ffmpeg.vmaf_motion_score,
+    aesthetics.aesthetic_score,
+    dover.technical_dover_score,
+    lpips.lpips_trajectory_mean
+  FROM `research-prototypes.generative_ai_data_platform.data` data
+  -- FROM `research-prototypes.generative_ai_data_platform_test.hybrid_videos_for_training_west_20250724` data
+  INNER JOIN `research-prototypes.generative_ai_data_platform.hcoskun_annotation_aesthetics_scoretable_full` AS a_aes_table USING (data_id)
+  INNER JOIN AudioChunkClass AS a_class_table USING (data_id)
+  INNER JOIN `research-prototypes.generative_ai_data_platform.hcoskun_annotation_audio_metadata_full` AS audio_meta USING (data_id)
+  INNER JOIN `research-prototypes.generative_ai_data_platform.qwen2vl_captions` captions USING (data_id)
+  INNER JOIN `research-prototypes.generative_ai_data_platform.annotation_ffmpeg_metadata` ffmpeg USING (data_id)
+  INNER JOIN `research-prototypes.generative_ai_data_platform.annotation_video_metadata` video_meta USING (data_id)
+  INNER JOIN `research-prototypes.generative_ai_data_platform.annotation_aesthetics` aesthetics USING (data_id)
+  INNER JOIN `research-prototypes.generative_ai_data_platform.annotation_dover` dover USING (data_id)
+  INNER JOIN `research-prototypes.generative_ai_data_platform.annotation_lpips` lpips USING (data_id)
+  INNER JOIN `research-prototypes.generative_ai_data_platform.annotation_nsfw_qwen2vl_7b_classification` nsfw USING (data_id)
+  WHERE
+    -- Video filtering.
+    captions.caption IS NOT NULL
+    AND aesthetics.aesthetic_score IS NOT NULL
+    AND dover.technical_dover_score IS NOT NULL
+    AND ffmpeg.vmaf_motion_score IS NOT NULL
+    AND lpips.lpips_trajectory_mean IS NOT NULL
+    AND nsfw.is_nsfw = 0
+    AND LEAST(video_meta.width, video_meta.height) >= 256
+    AND ffmpeg.vmaf_motion_score > 10
+    AND ffmpeg.vmaf_motion_score < 20
+    AND aesthetics.aesthetic_score >= 3.0
+    AND lpips.lpips_trajectory_mean >= 0.1
+    AND dover.technical_dover_score >= 0.005
+
+    -- Audio filtering.
+    AND a_aes_table.error IS FALSE
+    AND a_aes_table.error IS FALSE
+    AND video_meta.error IS FALSE
+    AND video_meta.has_audio IS TRUE
+    AND audio_meta.score >= 5
+    AND a_aes_table.content_usefulness >= 0.5
+    AND a_aes_table.production_complexity >= 0.4
+    AND a_aes_table.production_quality >= 0.6
+    AND a_aes_table.content_enjoyment >= 0.4
+  ORDER BY RAND()
+s3_destination_path: s3://snap-genvid-us-east-2/datasets/sds-index-files/av/v0.4.parquet
+s3_bucket_region: us-east-2
+recompute: true
+val_ratio: 0.1
+max_num_val_rows: 2048
+local_tmp_dir: ~
+gcs_tmp_dir: ~
+row_group_size: 20000
