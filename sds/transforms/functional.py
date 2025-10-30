@@ -276,10 +276,12 @@ def decode_audio_from_video_decoder(video_decoder: VideoDecoder, start_ts: float
 
     return waveform, audio_stream.rate
 
+
 @beartype
 def resample_waveform(waveform: torch.Tensor, **resampling_kwargs) -> torch.Tensor:
     assert torchaudio is not None, "torchaudio is not available. Please install it to use audio resampling."
     return torchaudio.functional.resample(waveform, **resampling_kwargs)
+
 
 @beartype
 def resize_waveform(waveform: torch.Tensor, target_length: int, mode: str='pad_or_trim') -> torch.Tensor:
@@ -299,6 +301,7 @@ def resize_waveform(waveform: torch.Tensor, target_length: int, mode: str='pad_o
         return torch.cat([waveform, padding], dim=-1) # [..., num_channels, target_length]
     else:
         return waveform[..., :target_length] # [..., num_channels, target_length]
+
 
 def max_mean_window_idx(x: torch.Tensor, window: int):
     """Returns the starting index of the window with the maximum mean absolute value."""

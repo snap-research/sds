@@ -15,6 +15,10 @@ from PIL import Image
 from sds.structs import SampleData, SampleTransform
 import sds.transforms.functional as SDF
 
+try:
+    import audiotools
+except ImportError:
+    audiotools = None
 
 #----------------------------------------------------------------------------
 # Base transforms.
@@ -221,13 +225,30 @@ class ResizeAudioTransform(BaseTransform):
         sample[self.output_field] = waveform # [c, t]
         return sample
 
-class NormalizeAudioTransform(BaseTransform):
-    """Normalizes the audio waveform to have maximum absolute value of 0.95."""
+
+@beartype
+class NormalizeAudioTransform:
+    """
+    Normalizes the audio waveform in two ways following DAC:
+    - first, change the volume s.t. it is -24.0 dB.
+    - then, make sure that the maximum absolute value is 1, only for channels that exceed it.
+    """
+    def __init__(self, audio_input_field: str, sample_rate_field: str | None = None, audio_sr: int | None = None):
+        assert (audio_sr is not None) or (sample_rate_field is not None), "Either audio_sr or sample_rate_field must be provided."
+        self.audio_input_field = audio_input_field
+        self.sample_rate_field = sample_rate_field
+        self.audio_sr = audio_sr
+
     def __call__(self, sample: SampleData) -> SampleData:
-        _validate_fields(sample, present={self.input_field: torch.Tensor}, absent=[])
-        waveform = sample[self.input_field]
-        max_val = waveform.abs().max()
-        sample[self.output_field] = (waveform / max_val * 0.95) if max_val > 0 else waveform
+        _validate_fields(sample, present={self.audio_input_field: torch.Tensor}, absent=[])
+        waveform = sample[self.audio_input_field] # [c, t]
+        assert waveform.ndim == 2, f"Expected audio waveform to have 2 dimensions [c, t], but got {waveform.shape}."
+        sample_rate = sample[self.sample_rate_field] if self.sample_rate_field is not None else self.audio_sr
+        assert sample_rate == self.audio_sr or self.audio_sr is None, f"ASR={sample_rate} from field {self.sample_rate_field} does not match the provided `audio_sr={self.audio_sr}`."
+        audio_signal = audiotools.AudioSignal(waveform, sample_rate=sample_rate)
+        audio_signal.ensure_max_of_audio(1.0) # Ensure max abs value is 1.0
+        audio_signal.normalize(db=-24.0) # Normalize to -24.0 dB
+        sample[self.audio_input_field] = audio_signal.audio_data.squeeze(0)  # [c, t]
         return sample
 
 @beartype
@@ -312,7 +333,6 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         frame_timestamps_input_field: str | None = None,
         frame_timestamps_output_field: str | None = None,
         duration_output_field: str | None = None,
-        silent_audio_thresh: float | None = None, # If provided, will throw an error if the decoded audio is too silent.
         **decode_kwargs,
     ):
         self.input_field = input_field
@@ -326,7 +346,6 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         self.decode_kwargs = decode_kwargs
         self.frame_timestamps_input_field = frame_timestamps_input_field
         self.frame_timestamps_output_field = frame_timestamps_output_field
-        self.silent_audio_thresh = silent_audio_thresh
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present=[self.input_field], absent=[self.audio_output_field, self.original_sr_output_field])
@@ -340,9 +359,6 @@ class DecodeVideoAndAudioTransform(BaseTransform):
         video_data, frame_timestamps, clip_duration, waveform_data, waveform_sampling_rate = SDF.decode_video(
             sample[self.input_field], num_frames_to_extract=self.num_frames, real_duration=real_duration,
             real_framerate=real_framerate, frame_timestamps=frame_timestamps, **self.decode_kwargs, return_audio=True)
-        if self.silent_audio_thresh is not None:
-            max_amplitude = np.abs(waveform_data).max().item()
-            assert max_amplitude >= self.silent_audio_thresh, f"Audio is too silent: max amplitude {max_amplitude} < threshold {self.silent_audio_thresh}."
         sample[self.video_output_field] = video_data
         sample[self.audio_output_field] = waveform_data
         sample[self.original_sr_output_field] = waveform_sampling_rate
@@ -787,7 +803,7 @@ def create_standard_audio_pipeline(
     if mono_audio:
         transforms.append(AverageAudioTransform(input_field=output_field))
     if normalize_audio:
-        transforms.append(NormalizeAudioTransform(input_field=output_field))
+        transforms.append(NormalizeAudioTransform(audio_input_field=output_field, audio_sr=target_audio_sr))
 
     return transforms
 
@@ -831,7 +847,7 @@ def create_standard_joint_video_audio_pipeline(
     if mono_audio:
         transforms.append(AverageAudioTransform(input_field=audio_output_field))
     if normalize_audio:
-        transforms.append(NormalizeAudioTransform(input_field=audio_output_field))
+        transforms.append(NormalizeAudioTransform(audio_input_field=audio_output_field, audio_sr=target_audio_sr))
 
     return transforms
 
