@@ -146,6 +146,43 @@ def _apply_crop(x: Image.Image | torch.Tensor, crop: tuple[int, int, int, int]) 
         return x[:, crop[1]:crop[3], crop[0]:crop[2]]
 
 @beartype
+def _maybe_expand_crop_interval(crop_interval: tuple[float, float] | None, crop_interval_type: str, clip_duration: float, full_video_duration: float) -> tuple[float, float]:
+    """
+    Expands the crop interval to be at least clip_duration long, while not exceeding full_video_duration.
+    """
+
+    assert clip_duration <= full_video_duration, f"Clip duration {clip_duration} is longer than the full video duration {full_video_duration}."
+    if crop_interval_type == "hard" and crop_interval is not None and (crop_interval[1] - crop_interval[0]) < clip_duration:
+        raise ValueError(f"Provided crop_interval {crop_interval} is shorter than the requested clip duration {clip_duration} while crop_interval_type is 'hard'.")
+    if crop_interval_type == "hard" and crop_interval is not None and (crop_interval[0] < 0.0 or crop_interval[1] > full_video_duration):
+        raise ValueError(f"Provided crop_interval {crop_interval} is out of bounds [0.0, {full_video_duration}] while crop_interval_type is 'hard'.")
+
+    if crop_interval is None:
+        return (0.0, full_video_duration)
+
+    crop_interval = (max(0.0, crop_interval[0]), min(full_video_duration, crop_interval[1]))
+    sequence_crop_duration = crop_interval[1] - crop_interval[0]
+    # If needed, expand the sequence crop duration equally on each side to fit the clip duration
+    if sequence_crop_duration < clip_duration:
+        assert(crop_interval_type == "soft"), f"Crop interval type is 'hard' but the provided crop interval {crop_interval} is shorter than the requested clip duration {clip_duration}."
+
+        padding = (clip_duration - sequence_crop_duration) / 2
+        crop_interval = (crop_interval[0] - padding, crop_interval[1] + padding)
+        # Shifts to the left if we went beyond the video limits
+        if crop_interval[1] > full_video_duration:
+            shift = crop_interval[1] - full_video_duration
+            crop_interval = (crop_interval[0] - shift, full_video_duration)
+        # Shifts to the right if we went beyond the video limits
+        if crop_interval[0] < 0.0:
+            shift = -crop_interval[0]
+            crop_interval = (0.0, crop_interval[1] + shift)
+
+        # Ensures we are within bounds
+        crop_interval = (max(0.0, crop_interval[0]), min(full_video_duration, crop_interval[1]))
+
+    return crop_interval
+
+@beartype
 def decode_video(
     video_file: BinaryIO | str | None=None,
     num_frames_to_extract: int=1,
@@ -160,10 +197,16 @@ def decode_video(
     frame_timestamps: Sequence[float] | None = None, # If provided, we ignore the internally computed frame_timestamps and use the provided ones instead.
     real_duration: float | None = None, # If provided, we ignore the video metadata.
     real_framerate: float | None = None, # If provided, we ignore the video metadata.
+    speedup_factor: Union[int, float, None] = None, # If provided, we simulate video speed by this factor (i.e., we divide the framerate by this factor).
+    crop_interval: tuple[float, float] | None = None, # If provided, use this as a interval to crop the video from which to extract frames.
+    crop_interval_type: str | None = None # One of "hard" or "soft". If "hard", we strictly crop within the provided crop_interval. If "soft", we expand it if needed to fit the requested clip duration.
 ) -> tuple[Sequence[Image.Image], list[float], float, NDArray | None, int | None]:
     """
     Decodes frames from a video file or bytes. Either video_file or video_decoder must be provided.
     """
+    if crop_interval_type is None:
+        crop_interval_type = "hard"
+
     should_close_decoder = video_decoder is None
     if video_decoder is None:
         assert video_file is not None, "Video bytes must be provided if no video decoder is specified."
@@ -175,18 +218,25 @@ def decode_video(
     # AV video metadata is not always accurate, so we can opt for using our pre-computed one.
     base_framerate = video_decoder.framerate if real_framerate is None else real_framerate
     target_framerate = base_framerate if framerate is None else framerate
+    target_framerate = target_framerate / speedup_factor if speedup_factor is not None else target_framerate  # Simulating speedup by reducing the framerate.
     full_video_duration = (video_decoder.video_stream.frames / base_framerate) if real_duration is None else real_duration
     clip_duration = num_frames_to_extract / target_framerate
 
     if clip_duration > full_video_duration:
         assert allow_shorter_videos, f"Video duration {full_video_duration} is shorter than the requested clip duration {clip_duration} while allow_shorter_videos={allow_shorter_videos}."
-        clip_duration = full_video_duration
-        num_frames_to_extract = max(1, round(clip_duration * target_framerate))
+        num_frames_to_extract = max(1, math.floor(full_video_duration * target_framerate))
+        clip_duration = num_frames_to_extract / target_framerate  # We changed the number of frames so we must update the clip duration
+
+    # Adjusting the sequence crop time to conform to the requested clip duration
+    crop_interval = _maybe_expand_crop_interval(crop_interval, crop_interval_type, clip_duration, full_video_duration)
 
     if frame_timestamps is None:
-        start_ts = np.random.rand() * max(full_video_duration - clip_duration, 0.0) if random_offset else 0.0
-        frame_timestamps = start_ts + np.linspace(0, max(clip_duration - video_decoder.frame_duration, 0), num_frames_to_extract)
-        frame_timestamps = [t.item() for t in frame_timestamps if t <= full_video_duration] # Filter out timestamps that are beyond the video duration.
+        # Computes the base spacing for frames extraction according to the target framerate
+        frame_timestamps = np.linspace(0, max(clip_duration - 1 / target_framerate, 0), num_frames_to_extract)
+        sequence_crop_duration = crop_interval[1] - crop_interval[0]
+        start_ts = np.random.rand() * max(sequence_crop_duration - clip_duration, 0.0) + crop_interval[0] if random_offset else crop_interval[0]
+        frame_timestamps = start_ts + frame_timestamps
+        frame_timestamps = [min(t.item(), full_video_duration) for t in frame_timestamps]
     else:
         start_ts: float = frame_timestamps[0]
     decoding_fn = video_decoder.decode_frames_at_times_approx if approx_frame_seek else video_decoder.decode_frames_at_times
