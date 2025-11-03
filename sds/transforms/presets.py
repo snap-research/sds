@@ -244,11 +244,12 @@ class NormalizeAudioTransform:
     - first, change the volume s.t. it is -24.0 dB.
     - then, make sure that the maximum absolute value is 1, only for channels that exceed it.
     """
-    def __init__(self, audio_input_field: str, sample_rate_field: str | None = None, audio_sr: int | None = None):
+    def __init__(self, audio_input_field: str, sample_rate_field: str | None = None, audio_sr: int | None = None, volume_norm_db: float | None = -24.0):
         assert (audio_sr is not None) or (sample_rate_field is not None), "Either audio_sr or sample_rate_field must be provided."
         self.audio_input_field = audio_input_field
         self.sample_rate_field = sample_rate_field
         self.audio_sr = audio_sr
+        self.volume_norm_db = volume_norm_db
 
     def __call__(self, sample: SampleData) -> SampleData:
         _validate_fields(sample, present={self.audio_input_field: torch.Tensor}, absent=[])
@@ -258,7 +259,8 @@ class NormalizeAudioTransform:
         assert sample_rate == self.audio_sr or self.audio_sr is None, f"ASR={sample_rate} from field {self.sample_rate_field} does not match the provided `audio_sr={self.audio_sr}`."
         audio_signal = audiotools.AudioSignal(waveform, sample_rate=sample_rate)
         audio_signal.ensure_max_of_audio(1.0) # Ensure max abs value is 1.0
-        audio_signal.normalize(db=-24.0) # Normalize to -24.0 dB
+        if self.volume_norm_db is not None:
+            audio_signal.normalize(db=-24.0) # Normalize to -24.0 dB
         sample[self.audio_input_field] = audio_signal.audio_data.squeeze(0)  # [c, t]
         return sample
 
@@ -811,6 +813,7 @@ def create_standard_audio_pipeline(
     original_audio_sr_field: str = 'original_audio_sampling_rate', # In which field should we store the original audio sampling rate.
     audio_decoding_kwargs={}, # Extra decoding parameters for DecodeAudioTransform
     audio_resampling_kwargs={}, # Extra resampling parameters for ResizeAudioTransform
+    audio_norm_kwargs: dict = {}, # Extra normalization parameters for NormalizeAudioTransform
 ) -> Sequence[SampleTransform]:
     transforms: Sequence[SampleTransform] = [
         DecodeAudioTransform(input_field=audio_field, output_field=output_field, duration=duration, original_sr_output_field=original_audio_sr_field, **audio_decoding_kwargs),
@@ -819,7 +822,7 @@ def create_standard_audio_pipeline(
     if mono_audio:
         transforms.append(AverageAudioTransform(input_field=output_field))
     if normalize_audio:
-        transforms.append(NormalizeAudioTransform(audio_input_field=output_field, audio_sr=target_audio_sr))
+        transforms.append(NormalizeAudioTransform(audio_input_field=output_field, audio_sr=target_audio_sr, **audio_norm_kwargs))
 
     return transforms
 
@@ -837,6 +840,7 @@ def create_standard_joint_video_audio_pipeline(
     audio_resampling_kwargs: dict = {}, # Extra resampling parameters for ResizeAudioTransform
     video_output_field: str = 'video', # In which field should we store the video result.
     audio_output_field: str = 'audio',  # In which field should we store the audio result.
+    audio_norm_kwargs: dict = {}, # Extra normalization parameters for NormalizeAudioTransform
 ):
     transforms: Sequence[SampleTransform] = [
         DecodeVideoAndAudioTransform(
@@ -863,7 +867,7 @@ def create_standard_joint_video_audio_pipeline(
     if mono_audio:
         transforms.append(AverageAudioTransform(input_field=audio_output_field))
     if normalize_audio:
-        transforms.append(NormalizeAudioTransform(audio_input_field=audio_output_field, audio_sr=target_audio_sr))
+        transforms.append(NormalizeAudioTransform(audio_input_field=audio_output_field, audio_sr=target_audio_sr, **audio_norm_kwargs))
 
     return transforms
 

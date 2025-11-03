@@ -23,6 +23,7 @@ def build_audio_transforms_pipeline() -> list[Callable]:
         audio_resampling_kwargs=dict(
 
         ),
+        audio_norm_kwargs=dict(volume_norm_db=-16.0),
         target_audio_sr=target_audio_sr,
     )
 
