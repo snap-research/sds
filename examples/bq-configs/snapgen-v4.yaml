@@ -1,0 +1,271 @@
+bq_project: "research-prototypes"
+sql_query: |
+  -- Helpers to avoid repeating REGEXP_CONTAINS across multiple captions
+  CREATE TEMP FUNCTION matches_any(captions ARRAY<STRING>, re STRING) AS (
+    EXISTS(SELECT 1 FROM UNNEST(captions) c WHERE c IS NOT NULL AND REGEXP_CONTAINS(LOWER(c), re))
+  );
+  CREATE TEMP FUNCTION not_matches_any(captions ARRAY<STRING>, re STRING) AS (
+    NOT matches_any(captions, re)
+  );
+
+  WITH params AS (
+    SELECT
+      -- Shared unsafe lexicon (long list)
+      r'\bgenitalia\b|\bbuttocks\b|\bnipples\b|\bnude\b|\bsex\b|\boral sex\b|\bpenetrative sex\b|\bmasturbation\b|\bsemen\b|\bdischarge\b|\bmenstrual blood\b|\burine\b|\basphyxiation\b|\bbdsm\b|\bbestiality\b|\bincest\b|\bnecrophilia\b|\bafter sex\b|\bfellatio\b|\bforeplay\b|\bcuddling\b|\bremove clothes\b|\bejaculate\b|\bvaginal discharge\b|\bgang bang\b|\bhuman trafficking\b|\bprostitution\b|\bsex trafficking\b|\bforced labor\b|\bsoliciting\b|\bporn pics\b|\bnude pics\b|\bonlyfans\b|\bcamgirl\b|\bsextortion\b|\bsexual favor\b|\bmoney for sex\b|\bsex abuse\b|\bpimp\b|\bprostitute\b|\brape\b|\brestrained wrists\b|\bfemale breasts\b|\bcrotch area\b|\bsex emojis\b|\bfursona, furries\b|\bfoot fetish\b|\bsex role-playing\b|\bpenis enlargement\b|\bpenis shrinking\b|\bthong\b|\bcleavage\b|\bskintight bodysuit\b|\bstripper pole\b|\bmoney in undies\b|\blingerie\b|\bflogger\b|\bball gags\b|\bhandcuffs\b|\bvibrator\b|\banal beads\b|\bbutt plugs\b|\bbutt plugs animal tail\b|\blap dances\b|\bgrinding\b|\bhumping\b|\bphallic\b|\berotic\b|\bundressing\b|\bbutt plug\b|\bpelvic\b|\bpelvis\b|\bmons pubis\b|\blabia majora\b|\blabia minora\b|\bclitoris\b|\burethral opening\b|\bvaginal opening\b|\bintroitus\b|\bvulva\b|\bperineum\b|\bbartholins glands\b|\bskenes glands\b|\bvagina\b|\bcervix\b|\buterus\b|\bfallopian tubes\b|\bovaries\b|\bendometrium\b|\buterine lining\b|\bmyometrium\b|\bpenis\b|\bforeskin\b|\bscrotum\b|\btesticles\b|\btestes\b|\bovotestes\b|\bepididymis\b|\bvas deferens\b|\bseminal vesicles\b|\bprostate gland\b|\bbulbourethral glands\b|\bcowpers glands\b|\burethra\b|\bareola\b|\bmilk ducts\b|\bgluteus maximus\b|\bbreasts\b|\banus\b|\bfrançois boucher\b|\bodalisque\b|\bleda and the swan\b|\bvenus consoling love\b|\bjean-honoré fragonard\b|\bthe bather\b|\bthe swing\b|\bélisabeth vigée le brun\b|\bsimon vouet\b|\bvenus and adonis\b|\bcharles-joseph natoire\b|\bpsyche and cupid\b|\brococo\b|\botjize\b|\bhimba\b|\bnuba\b|\bsurma\b|\bmursi\b|\byanomami\b|\bkayapo\b|\bzoé\b|\bdani\b|\bkorowai\b|\basmat\b' AS unsafe_re,
+
+      -- Getty-only lexical filters
+      r'\b(?:isolated[ -]?on[ -]?white|plain[ -]?backgrounds?)\b' AS isolated_re_30,
+      r'\b(?:isolated[ -]?on[ -]?white|plain?)\b'                  AS isolated_re_77_256,
+      r'\b(illustration?|icon?|vector?|abstract?|design?|painting?|drawing?)\b' AS artstyle_re,
+      r'\b(white|black|red|yellow|orange|blue|green|pink|purple|grey|gray|brown|gold|silver)[ -]?(?:background|backdrop|surface)s?\b' AS color_bg_re
+  ),
+
+  ------------------------------------------------------------------------------
+  -- FLICKR (no aspect-ratio filter)
+  ------------------------------------------------------------------------------
+  flickr AS (
+    SELECT
+      p.media_id                                AS data_id,
+      p.media_id                                AS media_id,
+      'flickr_horizontal_west'                  AS dataset_name,
+      p.data_url,
+      c30.caption                               AS caption_30,
+      c77.caption                               AS caption_77,
+      c256.caption                              AS caption_256,
+      r.image_height                            AS height,
+      r.image_width                             AS width,
+      ROUND(SAFE_DIVIDE(r.image_height, r.image_width), 1) AS aspect_ratio,
+      aes.aes_score,
+      nsfw.nudity_score,
+      nsfw.children,
+      CAST(nsfw2.is_nsfw AS INT64)              AS qwen_is_nsfw
+    FROM perc-dev.hcoskun_dev.unshared_flickr_west2 p
+    JOIN perc-dev.hcoskun_dev.flickr_aes_merged_unique          aes   USING (media_id)
+    JOIN perc-dev.hcoskun_dev.flickr_caption_internlm_30_merged c30   ON c30.media_id = aes.media_id
+    JOIN perc-dev.hcoskun_dev.flickr_caption_internlm_77_merged c77   ON c77.media_id = aes.media_id
+    JOIN perc-dev.hcoskun_dev.flickr_captions_intervl3_14b_256  c256  ON c256.media_id = aes.media_id
+    JOIN perc-dev.hcoskun_dev.flickr_image_resolutions          r     ON r.media_id   = aes.media_id
+    JOIN perc-dev.hcoskun_dev.flickr_nsfw_merged_unique         nsfw  ON nsfw.media_id = aes.media_id
+    JOIN research-prototypes.generative_ai_data_platform_test.unsharded_flickr_images sh_e ON sh_e.media_id = p.media_id
+    JOIN research-prototypes.generative_ai_data_platform_test.nsfw_0_5_flickr_0_2_2_images nsfw2 ON nsfw2.data_id = sh_e.data_id
+    LEFT JOIN (
+      SELECT DISTINCT media_id
+      FROM perc-dev.hcoskun_dev.flickr_tags_rampp, UNNEST(tags) tag_name
+      WHERE CONTAINS_SUBSTR(tag_name,'illustration') OR CONTAINS_SUBSTR(tag_name,'icon')
+    ) icon ON icon.media_id = aes.media_id
+    WHERE p.is_succeed IS TRUE
+      AND icon.media_id IS NULL
+      AND aes.aes_score >= 5.0
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY p.media_id ORDER BY p.media_id) = 1
+  ),
+
+  ------------------------------------------------------------------------------
+  -- GETTY (no aspect-ratio filter)
+  ------------------------------------------------------------------------------
+  getty AS (
+    SELECT
+      u.media_id                                 AS data_id,
+      u.media_id                                 AS media_id,
+      'getty_horizontal_west'                    AS dataset_name,
+      u.data_url,
+      COALESCE(j.caption, j.title)               AS caption_30,
+      c77.caption                                AS caption_77,
+      c256.caption                               AS caption_256,
+      res.height                                 AS height,
+      res.width                                  AS width,
+      ROUND(SAFE_DIVIDE(res.height, res.width), 1) AS aspect_ratio,
+      aes.aes_score,
+      nsfw.nudity_score,
+      nsfw.children,
+      CAST(nsfw2.is_nsfw AS INT64)               AS qwen_is_nsfw
+    FROM perc-dev.hcoskun_dev.unshared_getty_139m_west2 u
+    JOIN perc-dev.hcoskun_dev.treasure_aes_getty_155m_v1_20240201 aes  USING (media_id)
+    JOIN perc-dev.hcoskun_dev.getty_imagest_full_jsons j        ON CONCAT('getty_', j.media_id) = aes.media_id
+    JOIN perc-dev.hcoskun_dev.getty139m_captions_internlm_7b_77  c77   ON c77.media_id  = aes.media_id
+    JOIN perc-dev.hcoskun_dev.getty139m_captions_intervl3_14b_256 c256 ON c256.media_id = aes.media_id
+    JOIN perc-dev.hcoskun_dev.treasure_aes_getty_155m_v1_20240201 res  ON res.media_id  = aes.media_id
+    JOIN perc-dev.hcoskun_dev.getty_nsfw_fullset nsfw ON nsfw.media_id = aes.media_id
+    JOIN research-prototypes.generative_ai_data_platform_test.unsharded_original_getty_images sh_e ON sh_e.media_id = u.media_id
+    JOIN research-prototypes.generative_ai_data_platform_test.nsfw_0_5_original_getty_0_2_2_images_v3 nsfw2 ON nsfw2.data_id = sh_e.data_id
+    LEFT JOIN (
+      SELECT DISTINCT CONCAT('getty_', media_id) AS media_id
+      FROM perc-dev.hcoskun_dev.getty_imagest_full_jsons, UNNEST(keywords) kw
+      WHERE CONTAINS_SUBSTR(LOWER(kw.text),'illustration') OR CONTAINS_SUBSTR(LOWER(kw.text),'icon')
+    ) icon_kw ON icon_kw.media_id = aes.media_id
+    LEFT JOIN (
+      SELECT DISTINCT media_id
+      FROM perc-dev.hcoskun_dev.getty_tags_delivery_v3_images139m_rampp, UNNEST(tags) tag_name
+      WHERE CONTAINS_SUBSTR(tag_name,'illustration') OR CONTAINS_SUBSTR(tag_name,'icon')
+    ) icon_tag ON icon_tag.media_id = aes.media_id
+    WHERE u.is_succeed IS TRUE
+      AND icon_kw.media_id IS NULL
+      AND icon_tag.media_id IS NULL
+      AND aes.aes_score >= 4.5
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY u.media_id ORDER BY u.media_id) = 1
+  ),
+
+  ------------------------------------------------------------------------------
+  -- NEW GETTY (no aspect-ratio filter)
+  ------------------------------------------------------------------------------
+  newgetty AS (
+    SELECT
+      d.data_id,
+      CAST(d.media_id AS STRING)                   AS media_id,
+      'getty_images_tarred'                        AS dataset_name,
+      p.data_url,
+      COALESCE(m.caption, m.title)                 AS caption_30,
+      long.caption                                 AS caption_77,
+      c256.caption                                 AS caption_256,
+      meta.height,
+      meta.width,
+      ROUND(SAFE_DIVIDE(meta.height, meta.width), 1) AS aspect_ratio,
+      meta.aes_score,
+      nsfw.nudity_score,
+      nsfw.children,
+      CAST(qwen.is_nsfw AS INT64)                  AS qwen_is_nsfw
+    FROM research-prototypes.generative_ai_data_platform_test.unsharded_getty_images d
+    JOIN perc-dev.hcoskun_dev.unshared_new_getty_west2 p ON p.media_id = CAST(d.media_id AS STRING)
+    JOIN research-prototypes.generative_ai_data_platform_test.gettynew_captions_molmo_512_copy long ON long.media_id = d.media_id
+    JOIN perc-dev.hcoskun_dev.new_getty_captions_intervl3_14b_256 c256 ON c256.media_id = d.media_id
+    JOIN perc-dev.hcoskun_dev.newgetty_original_metadata m ON m.media_id = d.media_id
+    JOIN perc-dev.hcoskun_dev.new_getty_aes meta ON meta.media_id = d.media_id
+    JOIN perc-dev.hcoskun_dev.newgetty_nsfw_nudenet nsfw ON nsfw.media_id = d.media_id
+    JOIN research-prototypes.generative_ai_data_platform_test.nsfw_0_5_getty_0_2_2_images qwen ON qwen.data_id = d.data_id
+    WHERE meta.aes_score >= 4.5
+      AND d.ext IN ('.jpg', '.png', '.jpeg')
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY d.media_id ORDER BY d.media_id) = 1
+  ),
+
+  ------------------------------------------------------------------------------
+  -- TREASURE (no aspect-ratio filter)
+  ------------------------------------------------------------------------------
+  treasure AS (
+    SELECT
+      t.data_id,
+      t.media_id,
+      'treasure_images'                            AS dataset_name,
+      t.data_url,
+      c30.caption                                  AS caption_30,
+      c77.caption                                  AS caption_77,
+      c256.caption                                 AS caption_256,
+      meta.height,
+      meta.width,
+      ROUND(SAFE_DIVIDE(meta.height, meta.width), 1) AS aspect_ratio,
+      meta.aes_score,
+      nsfw.nudity_score,
+      nsfw.children,
+      NULL AS qwen_is_nsfw
+    FROM perc-dev.hcoskun_dev.unshared_treasure_west2 t
+    JOIN perc-dev.hcoskun_dev.captions_treasure_internlm_7b_30  c30  USING (media_id)
+    JOIN perc-dev.hcoskun_dev.captions_treasure_internlm_7b_77  c77  USING (media_id)
+    JOIN perc-dev.hcoskun_dev.treasure_captions_intervl3_14b_256 c256 USING (media_id)
+    JOIN perc-dev.hcoskun_dev.treasure_treasure_170m_aes_filtered_20240126 meta USING (media_id)
+    JOIN perc-dev.hcoskun_dev.treasure_nsfw nsfw USING (media_id)
+    WHERE meta.aes_score >= 4.5
+      AND t.ext IN ('.jpg', '.png', '.jpeg')
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY t.media_id ORDER BY t.media_id) = 1
+  ),
+
+  ------------------------------------------------------------------------------
+  -- SYNTHETIC (new; no aspect-ratio/size filter)
+  ------------------------------------------------------------------------------
+  synthetic AS (
+    WITH caption_30_table AS (
+      SELECT * FROM `perc-dev.hcoskun_dev.fake_target_ip2p_1M_1344x768_0911_v2_intern_30`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_source_ip2p_1M_1344x768_0911_v2_intern_30`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.diffdb_1344x768_dpmpp2msde_0214_flux_schnell_namefix_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_openprompts_1344x768_dpmpp2msde_0214_flux_schnell_namefix_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_openprompts_1024x1024_1018_flux_schnell_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.diffdb_1024x1024_1018_flux_schnell_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_target_ip2p_prompts_2M_1344x768_dpmpp2msde_0917_redo_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_diffdb_1024x1024_dpmpp2msde_0210_intern_30`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_openprompts_1024x1024_dpmpp2msde_0214_intern_30`
+    ),
+    caption_77_table AS (
+      SELECT * FROM `perc-dev.hcoskun_dev.fake_target_ip2p_1M_1344x768_0911_v2_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_source_ip2p_1M_1344x768_0911_v2_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.diffdb_1344x768_dpmpp2msde_0214_flux_schnell_namefix_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_openprompts_1344x768_dpmpp2msde_0214_flux_schnell_namefix_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_openprompts_1024x1024_1018_flux_schnell_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.diffdb_1024x1024_1018_flux_schnell_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_target_ip2p_prompts_2M_1344x768_dpmpp2msde_0917_redo_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_diffdb_1024x1024_dpmpp2msde_0210_intern_77`
+      UNION ALL SELECT * FROM `perc-dev.hcoskun_dev.fake_openprompts_1024x1024_dpmpp2msde_0214_intern_77`
+    ),
+    synthetic_nsfw_table AS (
+      SELECT media_id, nudity_score, children, 768 AS width, 1344 AS height FROM perc-dev.hcoskun_dev.nsfw_fake_target_ip2p_1M_1344x768_0911
+      UNION ALL SELECT media_id, nudity_score, children, 768 AS width, 1344 AS height FROM perc-dev.hcoskun_dev.nsfw_fake_source_ip2p_1M_1344x768_0911
+      UNION ALL SELECT media_id, nudity_score, children, 768 AS width, 1344 AS height FROM perc-dev.hcoskun_dev.nsfw_diffdb_1344x768_dpmpp2msde_0214_flux_schnell_namefix
+      UNION ALL SELECT media_id, nudity_score, children, 768 AS width, 1344 AS height FROM perc-dev.hcoskun_dev.nsfw_fake_openprompts_1344x768_dpmpp2msde_0214_flux_schnell_namefix
+      UNION ALL SELECT media_id, nudity_score, children, 1024 AS width, 1024 AS height FROM perc-dev.hcoskun_dev.nsfw_fake_openprompts_1024x1024_1018_flux_schnell
+      UNION ALL SELECT media_id, nudity_score, children, 1024 AS width, 1024 AS height FROM perc-dev.hcoskun_dev.nsfw_diffdb_1024x1024_1018_flux_schnell
+      UNION ALL SELECT media_id, nudity_score, children, 768 AS width, 1344 AS height FROM perc-dev.hcoskun_dev.nsfw_fake_target_ip2p_prompts_2M_1344x768_dpmpp2msde_0917_redo
+      UNION ALL SELECT media_id, nudity_score, children, 1024 AS width, 1024 AS height FROM perc-dev.hcoskun_dev.nsfw_fake_openprompts_1024x1024_dpmpp2msde_0214
+      UNION ALL SELECT media_id, nudity_score, children, 1024 AS width, 1024 AS height FROM perc-dev.hcoskun_dev.nsfw_fake_diffdb_1024x1024_dpmpp2msde_0210
+    )
+    SELECT
+      d.data_id,
+      d.media_id,
+      'synthetic_images_tarred'                    AS dataset_name,
+      west.data_url,
+      c30.caption                                  AS caption_30,
+      c77.caption                                  AS caption_77,
+      COALESCE(c256.caption, long.caption)         AS caption_256,
+      nsfw.height,
+      nsfw.width,
+      ROUND(SAFE_DIVIDE(nsfw.height, nsfw.width), 1) AS aspect_ratio,
+      CAST(NULL AS FLOAT64)                        AS aes_score,
+      nsfw.nudity_score,
+      nsfw.children,
+      CAST(qwen.is_nsfw AS INT64)                  AS qwen_is_nsfw
+    FROM research-prototypes.generative_ai_data_platform_test.unsharded_synthetic_images d
+    JOIN perc-dev.hcoskun_dev.unsharded_synthetic_images_west west ON west.media_id = d.media_id
+    JOIN caption_30_table c30 ON d.media_id = SPLIT(c30.media_id, '/')[SAFE_OFFSET(1)]
+    JOIN caption_77_table c77 ON d.media_id = SPLIT(c77.media_id, '/')[SAFE_OFFSET(1)]
+    JOIN research-prototypes.generative_ai_data_platform_test.synthetic_caption_molmo_512_filtered long ON d.media_id = SPLIT(long.media_id, '/')[SAFE_OFFSET(1)]
+    LEFT JOIN perc-dev.hcoskun_dev.synthetic_captions_intervl3_14b_256 c256 ON d.media_id = SPLIT(c256.media_id, '/')[SAFE_OFFSET(1)]
+    JOIN synthetic_nsfw_table nsfw ON d.media_id = SPLIT(nsfw.media_id, '/')[SAFE_OFFSET(1)]
+    JOIN research-prototypes.generative_ai_data_platform_test.nsfw_0_5_synthetic_0_2_2_images qwen ON qwen.data_id = d.data_id
+    WHERE d.ext IN ('.jpg', '.png', '.jpeg')
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY d.media_id ORDER BY d.media_id) = 1
+  ),
+
+  -- Union everything (all aspect ratios included)
+  base AS (
+    SELECT * FROM flickr
+    UNION ALL SELECT * FROM getty
+    UNION ALL SELECT * FROM newgetty
+    UNION ALL SELECT * FROM treasure
+    UNION ALL SELECT * FROM synthetic
+  )
+
+  -- Apply shared filters once
+  SELECT *
+  FROM base
+  CROSS JOIN params p
+  WHERE
+    caption_30  IS NOT NULL
+    AND caption_77  IS NOT NULL
+    AND caption_256 IS NOT NULL
+    AND nudity_score < 0.001
+    AND children IS FALSE
+    AND (qwen_is_nsfw IS NULL OR qwen_is_nsfw = 0)
+    AND not_matches_any([caption_30, caption_77, caption_256], p.unsafe_re)
+    AND (
+      dataset_name NOT LIKE 'getty%'
+      OR (
+        NOT REGEXP_CONTAINS(LOWER(caption_30),  p.isolated_re_30)
+        AND NOT matches_any([caption_77, caption_256], p.isolated_re_77_256)
+        AND not_matches_any([caption_30, caption_77, caption_256], p.artstyle_re)
+        AND not_matches_any([caption_30, caption_77, caption_256], p.color_bg_re)
+      )
+    )
+  ORDER BY RAND()
+s3_destination_path: s3://snap-datastream/SnapGenv4/sds_preprocessing/iskorokhodov/v2_merged_all.parquet
+s3_bucket_region: us-west-2
+recompute: false
+val_ratio: 0.0
+max_num_val_rows: 0
+local_tmp_path: /lssd/index-exports-tmp
+gcs_tmp_dir: gs://dlahiri/index-exports-tmp
+row_group_size: 20000
