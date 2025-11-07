@@ -3,6 +3,7 @@ A set of presets for image/video/audio decoding and processing.
 """
 import io
 import math
+import gzip
 import pickle
 from typing import Union, Any, Sequence, BinaryIO
 
@@ -428,7 +429,8 @@ def load_pickle_embeddings(embeddings_path: str, num_tokens: int) -> torch.Tenso
     Loads raw pickle embeddings and converts them into a torch 2D tensor (with paddings).
     TODO: make it support a bytes input as well.
     """
-    with open(embeddings_path, 'rb') as f:
+    file_open = gzip.open if embeddings_path.endswith('.gz') else open
+    with file_open(embeddings_path, 'rb') as f:
         embeddings_data = pickle.load(f)
     embeddings = embeddings_data['embeddings'] # [num_tokens, d]
     embeddings[embeddings_data['eot_location'] + 1:] = 0.0 # Making sure that we have no junk after the EOT token.

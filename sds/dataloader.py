@@ -85,7 +85,7 @@ class StreamOptions:
         else:
             # Note: batch_size/batch_gpu/num_accum_rounds can be equal to 0 --- that means that we don't train on a given dataset.
             assert batch_size % world_size == 0, f"batch_size={batch_size} must be divisible by world_size={world_size}"
-            assert batch_gpu is None or (batch_size // world_size) % batch_gpu == 0, f"If batch_size is specified, batch_gpu must be divisible by (batch_size={batch_size} // world_size={world_size})"
+            assert batch_gpu is None or (batch_size // world_size) % batch_gpu == 0, f"Inconsistent arguments: (`batch_size={batch_size}` // world_size={world_size}`) % `batch_gpu={batch_gpu}`: != 0"
             batch_gpu = (batch_size // world_size) if batch_gpu is None else int(batch_gpu)
             num_accum_rounds = 0 if batch_gpu == 0 else (batch_size // (batch_gpu * world_size))
 
